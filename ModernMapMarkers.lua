@@ -1,0 +1,1045 @@
+local _G = _G or getfenv(0)
+local MMM = CreateFrame("Frame", "ModernMapMarkersCore", UIParent)
+MMM.markers = {}
+MMM.Data = {}
+MMM.ZoneMarkers = {}
+MMM.FlatDropdownData = nil
+MMM.ijInstalled = false
+
+-- Localization shorthand
+local L = ModernMapMarkers_Locale
+
+-- Filter constants
+local ALL_TYPES = { "DUNGEON", "RAID", "WORLDBOSS", "BOAT", "ZEPPELIN", "TRAM" }
+
+-- InstanceJournal Integration
+-- MMM markers to hide when IJ is installed (covered by IJ POI entrances)
+local IJ_HIDDEN_MARKERS = {
+    ["Blackrock Depths"]               = true,
+    ["Lower Blackrock Spire"]          = true,
+    ["Upper Blackrock Spire"]          = true,
+    ["Blackwing Lair"]                 = true,
+    ["Molten Core"]                     = true,
+    ["Dire Maul - East"]               = true,
+    ["Dire Maul - North"]              = true,
+    ["Dire Maul - West"]               = true,
+    ["Black Morass"]                    = true,
+    ["The Deadmines"]                   = true,
+    ["Temple of Ahn'Qiraj"]            = true,
+    ["Ruins of Ahn'Qiraj"]             = true,
+    ["Gnomeregan"]                      = true,
+    ["Maraudon"]                        = true,
+    ["Scarlet Monastery - Armory"]      = true,
+    ["Scarlet Monastery - Cathedral"]   = true,
+    ["Scarlet Monastery - Graveyard"]   = true,
+    ["Scarlet Monastery - Library"]     = true,
+    ["Uldaman - Main Entrance"]         = true,
+    ["Uldaman - Back Entrance"]         = true,
+    ["Wailing Caverns"]                 = true,
+    ["Windhorn Canyon"]                  = true,
+    ["Timbermaw Hold"]                   = true,
+}
+
+-- Map MMM marker names to IJ database keys for click behavior
+-- { db = "DG" or "R", key = IJDB key }
+local MMM_TO_IJ = {
+    -- Dungeons
+    ["Blackfathom Deeps"]                   = { db = "DG", key = "BFD" },
+    ["Crescent Grove"]                      = { db = "DG", key = "CG" },
+    ["Ragefire Chasm"]                      = { db = "DG", key = "RFC" },
+    ["Razorfen Downs"]                      = { db = "DG", key = "RFD" },
+    ["Razorfen Kraul"]                      = { db = "DG", key = "RFK" },
+    ["Zul'Farrak"]                          = { db = "DG", key = "ZF" },
+    ["Shadowfang Keep"]                     = { db = "DG", key = "SFK" },
+    ["The Stockade"]                        = { db = "DG", key = "STOCKADES" },
+    ["Stormwind Vault"]                     = { db = "DG", key = "SV" },
+    ["Stormwind Vault - Horde Entrance"]    = { db = "DG", key = "SV" },
+    ["Stratholme"]                          = { db = "DG", key = "STRAT" },
+    ["Stratholme - Back Gate"]              = { db = "DG", key = "STRAT" },
+    ["Scholomance"]                         = { db = "DG", key = "SCHOLO" },
+    ["The Sunken Temple"]                   = { db = "DG", key = "ST" },
+    ["Hateforge Quarry"]                    = { db = "DG", key = "HQ" },
+    ["Dragonmaw Retreat"]                   = { db = "DG", key = "DMR" },
+    ["Karazhan Crypt"]                      = { db = "DG", key = "KC" },
+    ["Lower Blackrock Spire"]              = { db = "DG", key = "LBRS" },
+    ["Upper Blackrock Spire"]              = { db = "DG", key = "UBRS" },
+    ["Gilneas City"]                        = { db = "DG", key = "GC" },
+    ["Stormwrought Ruins"]                  = { db = "DG", key = "SWR" },
+    ["Stormwrought Ruins - Back Entrance"]  = { db = "DG", key = "SWR" },
+    ["Frostmane Hollow"]                    = { db = "DG", key = "FH" },
+    ["Windhorn Canyon"]                     = { db = "DG", key = "WHC" },
+    -- Raids
+    ["Onyxia's Lair"]                       = { db = "R", key = "ONY" },
+    ["Emerald Sanctum"]                     = { db = "R", key = "ES" },
+    ["Lower Karazhan Halls"]                = { db = "R", key = "KARA10" },
+    ["Blackwing Lair"]                      = { db = "R", key = "BWL" },
+    ["Tower of Karazhan"]                   = { db = "R", key = "KARA40" },
+    ["Naxxramas"]                           = { db = "R", key = "NAXX" },
+    ["Zul'Gurub"]                           = { db = "R", key = "ZG" },
+    ["Timbermaw Hold"]                      = { db = "R", key = "TH" },
+}
+
+-- Keep POI submap zone markers
+local IJ_SUBMAP_ZONES = {}
+
+-- Default filters
+MMM.filters = {
+    DUNGEON   = true,
+    RAID      = true,
+    BOAT      = true,
+    ZEPPELIN  = true,
+    TRAM      = true,
+    WORLDBOSS = true,
+    FACTION   = "ALL"
+}
+
+-- Dirty-check state for RefreshMarkers
+local lastContinent = nil
+local lastZone      = nil
+local forceRefresh  = false
+
+-- Textures
+local TEX_BASE = "Interface\\AddOns\\ModernMapMarkers\\Textures\\"
+local TEXTURE_MAP = {
+    DUNGEON   = TEX_BASE .. "dungeon.tga",
+    RAID      = TEX_BASE .. "raid.tga",
+    BOAT      = TEX_BASE .. "boat.tga",
+    ZEPPELIN  = TEX_BASE .. "zepp.tga",
+    TRAM      = TEX_BASE .. "tram.tga",
+    WORLDBOSS = TEX_BASE .. "worldboss.tga",
+}
+local HIGHLIGHT_MAP = {
+    DUNGEON   = TEX_BASE .. "dungeon-highlight.tga",
+    RAID      = TEX_BASE .. "raid-highlight.tga",
+}
+
+-- Zone name cache
+local ZONE_CACHE = {}
+function MMM:CacheZones()
+    ZONE_CACHE[1] = { GetMapZones(1) } -- Kalimdor
+    ZONE_CACHE[2] = { GetMapZones(2) } -- Eastern Kingdoms
+end
+
+-- ---------------------------------------------------------------------------
+-- Helpers (Lua 5.0 safe: no #, no %, no varargs)
+-- ---------------------------------------------------------------------------
+local function Msg(text)
+    if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff7fff7fModernMapMarkers:|r " .. text)
+    end
+end
+
+-- Localized UI string (falls back to the English key when untranslated)
+local function T(key)
+    return L:GetLocalizedMarkerName(key)
+end
+
+-- "Dire Maul - East" -> "Dire Maul"
+local function BaseName(name)
+    name = name or ""
+    local i = string.find(name, " %- ")
+    if i then return string.sub(name, 1, i - 1) end
+    return name
+end
+
+local function FormatDuration(sec)
+    sec = math.floor(sec)
+    local d = math.floor(sec / 86400)
+    local h = math.floor((sec - d * 86400) / 3600)
+    local m = math.floor((sec - d * 86400 - h * 3600) / 60)
+    if d > 0 then return d .. "d " .. h .. "h" end
+    if h > 0 then return h .. "h " .. m .. "m" end
+    return m .. "m"
+end
+
+local function VecXY(v)
+    if type(v) ~= "table" then return nil, nil end
+    if v.GetXY then return v:GetXY() end
+    return v.x, v.y
+end
+
+-- ---------------------------------------------------------------------------
+-- ClassicAPI (C_Map) integration. Everything is feature-detected and wrapped
+-- in pcall, so the addon behaves exactly as before without the client mod.
+-- ---------------------------------------------------------------------------
+local function HasMapAPI()
+    return type(C_Map) == "table" and type(C_Map.GetMapChildrenInfo) == "function"
+end
+
+local function HasWaypointAPI()
+    return type(C_Map) == "table" and type(C_Map.SetUserWaypoint) == "function"
+       and type(C_Map.GetUserWaypointPositionForMap) == "function"
+       and type(UiMapPoint) == "table" and type(UiMapPoint.CreateFromCoordinates) == "function"
+end
+
+local function SafeChildren(id)
+    local ok, res = pcall(C_Map.GetMapChildrenInfo, id)
+    if ok and type(res) == "table" then return res end
+    return {}
+end
+
+-- uiMapIDs: zones use their positive AreaTable id, continents are negative
+-- (Kalimdor -13, Eastern Kingdoms -14). Resolved by localized name so it works
+-- on every locale; falls back to the documented continent ids.
+function MMM:BuildMapIDs()
+    if self.mapIDsBuilt then return end
+    self.contMapID = {}
+    self.zoneMapID = { {}, {} }
+    if not HasMapAPI() then return end
+
+    local worldID = type(C_Map.GetFallbackWorldMapID) == "function" and C_Map.GetFallbackWorldMapID()
+    if worldID and worldID ~= 0 then
+        local conts = { GetMapContinents() }
+        for _, kid in ipairs(SafeChildren(worldID)) do
+            for i, cname in ipairs(conts) do
+                if kid.name == cname then self.contMapID[i] = kid.mapID end
+            end
+        end
+    end
+    if not self.contMapID[1] then self.contMapID[1] = -13 end
+    if not self.contMapID[2] then self.contMapID[2] = -14 end
+
+    for i = 1, 2 do
+        local byName = {}
+        for _, kid in ipairs(SafeChildren(self.contMapID[i])) do
+            if kid.name and kid.mapID then byName[kid.name] = kid.mapID end
+        end
+        self.zoneMapID[i] = byName
+    end
+    -- Only remember the result once the zone lists were really filled,
+    -- so an early (empty) call is retried later instead of cached forever.
+    local filled = false
+    for _ in pairs(self.zoneMapID[1]) do filled = true end
+    if filled then self.mapIDsBuilt = true end
+end
+
+-- uiMapID of the map currently shown in the world map frame (nil if unknown)
+function MMM:GetViewedMapID()
+    self:BuildMapIDs()
+    local cont = GetCurrentMapContinent()
+    local zone = GetCurrentMapZone()
+    if not cont or cont <= 0 then return nil end
+    if zone == 0 then return self.contMapID[cont] end
+    local zones = ZONE_CACHE[cont]
+    local name = zones and zones[zone]
+    local byName = self.zoneMapID[cont]
+    return name and byName and byName[name] or nil
+end
+
+function MMM:GetMapIDForZone(contID, englishZone)
+    self:BuildMapIDs()
+    local byName = self.zoneMapID[contID]
+    if not byName then return nil end
+    return byName[L:GetLocalizedZoneName(englishZone)] or byName[englishZone]
+end
+
+-- Straight-line distance (yards) from the player to a point on a zone map.
+-- Returns nil when the player is not inside that zone (GetPlayerMapPosition
+-- returns nil there) or the API is unavailable.
+local function ComputeDistance(mapID, x, y)
+    local pos = C_Map.GetPlayerMapPosition(mapID, "player")
+    local px, py = VecXY(pos)
+    if not px or not py then return nil end
+    local w, h = C_Map.GetMapWorldSize(mapID)
+    if not w or not h or w <= 0 or h <= 0 then return nil end
+    local dx = (x - px) * w
+    local dy = (y - py) * h
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+function MMM:GetDistanceYards(mapID, x, y)
+    if not mapID or mapID <= 0 or not x or not y then return nil end
+    if type(C_Map) ~= "table" or type(C_Map.GetPlayerMapPosition) ~= "function"
+       or type(C_Map.GetMapWorldSize) ~= "function" then
+        return nil
+    end
+    local ok, d = pcall(ComputeDistance, mapID, x, y)
+    if ok then return d end
+    return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Waypoint (C_Map user waypoint) - Ctrl+Left-click a marker to set it
+-- ---------------------------------------------------------------------------
+function MMM:SetWaypointToMarker(marker)
+    if not HasWaypointAPI() or not marker.posX then return false end
+    local id = self:GetMapIDForZone(marker.continent, marker.zoneName)
+    if not id then return false end
+    if type(C_Map.CanSetUserWaypointOnMap) == "function" then
+        local okCan, can = pcall(C_Map.CanSetUserWaypointOnMap, id)
+        if okCan and can == false then return false end
+    end
+    local okPt, pt = pcall(UiMapPoint.CreateFromCoordinates, id, marker.posX, marker.posY)
+    if not okPt or not pt then return false end
+    local ok, res = pcall(C_Map.SetUserWaypoint, pt)
+    if ok and res ~= false then
+        Msg(T("Waypoint set:") .. " " .. (marker.name or ""))
+        return true
+    end
+    return false
+end
+
+function MMM:ClearWaypoint()
+    if type(C_Map) == "table" and type(C_Map.ClearUserWaypoint) == "function" then
+        pcall(C_Map.ClearUserWaypoint)
+    end
+end
+
+-- Tooltip that refreshes twice a second while hovered (live distance)
+local function HookTooltip(frame, showFn)
+    frame:SetScript("OnEnter", function()
+        local f = this
+        f.tipElapsed = 0
+        showFn(f)
+        if type(C_Map) ~= "table" or not C_Map.GetPlayerMapPosition then return end
+        f:SetScript("OnUpdate", function()
+            if not MouseIsOver(this) then
+                this:SetScript("OnUpdate", nil)
+                return
+            end
+            this.tipElapsed = this.tipElapsed + arg1
+            if this.tipElapsed >= 0.5 then
+                this.tipElapsed = 0
+                showFn(this)
+            end
+        end)
+    end)
+    frame:SetScript("OnLeave", function()
+        this:SetScript("OnUpdate", nil)
+        WorldMapTooltip:Hide()
+    end)
+end
+
+function MMM:ShowPinTooltip(pin)
+    WorldMapTooltip:SetOwner(pin, "ANCHOR_RIGHT")
+    WorldMapTooltip:AddLine(T("Waypoint"), 1, 0.82, 0)
+    if type(C_Map.GetUserWaypoint) == "function" then
+        local ok, point = pcall(C_Map.GetUserWaypoint)
+        if ok and point then
+            local x, y = VecXY(point.position)
+            local d = self:GetDistanceYards(point.uiMapID, x, y)
+            if d then
+                WorldMapTooltip:AddLine("~" .. math.floor(d + 0.5) .. " " .. T("yd away"), 0.6, 0.9, 0.6)
+            end
+        end
+    end
+    WorldMapTooltip:AddLine(T("Right-Click: Clear Waypoint"), 0.5, 0.5, 0.5)
+    WorldMapTooltip:Show()
+end
+
+function MMM:GetPin()
+    if self.pin then return self.pin end
+    local pin = CreateFrame("Button", "ModernMapMarkersWaypointPin", WorldMapButton)
+    pin:SetWidth(26)
+    pin:SetHeight(26)
+    pin:SetFrameLevel(WorldMapButton:GetFrameLevel() + 8)
+
+    local tex = pin:CreateTexture(nil, "OVERLAY")
+    tex:SetAllPoints(pin)
+    tex:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
+    tex:SetTexCoord(0.5, 0.75, 0.25, 0.5) -- the "Cross" raid icon
+    pin.texture = tex
+
+    pin:RegisterForClicks("RightButtonUp")
+    pin:SetScript("OnClick", function() MMM:ClearWaypoint() end)
+    HookTooltip(pin, function(f) MMM:ShowPinTooltip(f) end)
+
+    pin:Hide()
+    self.pin = pin
+    return pin
+end
+
+-- Draw / hide the waypoint pin for the currently viewed map
+function MMM:UpdateWaypointPin()
+    if not HasWaypointAPI() or not WorldMapFrame:IsVisible() then
+        if self.pin then self.pin:Hide() end
+        return
+    end
+
+    local x, y
+    local viewID = self:GetViewedMapID()
+    local has = true
+    if type(C_Map.HasUserWaypoint) == "function" then
+        local okH, h = pcall(C_Map.HasUserWaypoint)
+        has = okH and h
+    end
+    if viewID and has then
+        local ok, p = pcall(C_Map.GetUserWaypointPositionForMap, viewID)
+        if ok and p then x, y = VecXY(p) end
+    end
+
+    if not x or not y then
+        if self.pin then self.pin:Hide() end
+        return
+    end
+
+    local pin = self:GetPin()
+    pin:ClearAllPoints()
+    pin:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT",
+        x * WorldMapDetailFrame:GetWidth(), -y * WorldMapDetailFrame:GetHeight())
+    pin:Show()
+end
+
+-- ---------------------------------------------------------------------------
+-- Instance lockouts (stock 1.12 API - no client mod needed)
+-- ---------------------------------------------------------------------------
+local lockouts = {}
+
+function MMM:ScanLockouts()
+    if type(GetNumSavedInstances) ~= "function" or type(GetSavedInstanceInfo) ~= "function" then return end
+    lockouts = {}
+    local now = GetTime()
+    for i = 1, GetNumSavedInstances() do
+        local name, id, reset = GetSavedInstanceInfo(i)
+        if name then
+            lockouts[name] = { reset = tonumber(reset) or 0, t = now }
+        end
+    end
+end
+
+-- Seconds until the lockout for this marker resets, or nil when not saved
+function MMM:GetLockout(nameEN)
+    local base = BaseName(nameEN)
+    local rec = lockouts[L:GetLocalizedMarkerName(base)] or lockouts[base]
+    if not rec then return nil end
+    local remaining = rec.reset - (GetTime() - rec.t)
+    if remaining <= 0 then return nil end
+    return remaining
+end
+
+-- ---------------------------------------------------------------------------
+-- "Find Marker" highlight: pulse the found marker for a few seconds
+-- ---------------------------------------------------------------------------
+function MMM:StartHighlight(baseName)
+    self.highlightBase  = baseName
+    self.highlightUntil = GetTime() + 8
+    if not self.pulse then self.pulse = CreateFrame("Frame") end
+    self.pulse:SetScript("OnUpdate", function()
+        local now = GetTime()
+        if not MMM.highlightBase or now >= MMM.highlightUntil then
+            MMM.highlightBase = nil
+            for i = 1, table.getn(MMM.markers) do
+                MMM.markers[i].glow:Hide()
+                MMM.markers[i].glowOn = false
+            end
+            this:SetScript("OnUpdate", nil)
+            return
+        end
+        local a = 0.55 + 0.45 * math.sin(now * 7)
+        for i = 1, table.getn(MMM.markers) do
+            if MMM.markers[i].glowOn then MMM.markers[i].glow:SetAlpha(a) end
+        end
+    end)
+end
+
+-- Map multi-entrance dungeons to a single zone
+local CANONICAL_ZONE = {
+    ["Blackrock Depths"]      = "Burning Steppes",
+    ["Lower Blackrock Spire"] = "Burning Steppes",
+    ["Upper Blackrock Spire"] = "Burning Steppes",
+    ["Blackwing Lair"]        = "Burning Steppes",
+    ["Molten Core"]           = "Burning Steppes",
+    ["Stormwind Vault"]       = "Stormwind City",
+    ["Timbermaw Hold"]        = "Azshara",
+}
+
+-- Data Parsing
+function MMM:BuildData()
+    if self.dataBuilt then return end
+    if not ModernMapMarkers_Points then return end
+
+    MMM.Data = {}
+    MMM.ZoneMarkers = {}
+
+    local index = 1
+
+    for contID, zones in pairs(ModernMapMarkers_Points) do
+        MMM.ZoneMarkers[contID] = MMM.ZoneMarkers[contID] or {}
+
+        for zoneName, markers in pairs(zones) do
+            MMM.ZoneMarkers[contID][zoneName] = {}
+
+            for _, m in ipairs(markers) do
+                local typeUpper = string.upper(m.type or "UNKNOWN")
+                if typeUpper == "ZEPP" then typeUpper = "ZEPPELIN" end
+
+                local markerData = {
+                    continent   = contID,
+                    zoneName    = zoneName,
+                    x           = m.x,
+                    y           = m.y,
+                    name        = m.name,
+                    type        = typeUpper,
+                    description = m.info,
+                    id          = index
+                }
+
+                table.insert(MMM.Data, markerData)
+                table.insert(MMM.ZoneMarkers[contID][zoneName], markerData)
+
+                index = index + 1
+            end
+        end
+    end
+    self.dataBuilt = true
+end
+
+-- Get deduplicated data for dropdowns
+function ModernMapMarkers_GetFlatData()
+    MMM:BuildData()
+
+    if MMM.FlatDropdownData then return MMM.FlatDropdownData end
+
+    local filteredData = {}
+    local seenNames = {}
+
+    for _, data in ipairs(MMM.Data) do
+        if data.type == "DUNGEON" or data.type == "RAID" or data.type == "WORLDBOSS" then
+            local baseName = data.name or ""
+
+            local dashIndex = string.find(baseName, " %- ")
+            if dashIndex then
+                baseName = string.sub(baseName, 1, dashIndex - 1)
+            end
+
+            local existingIndex = seenNames[baseName]
+            if not existingIndex then
+                local dropData = {}
+                for k, v in pairs(data) do dropData[k] = v end
+                dropData.name = baseName
+                table.insert(filteredData, dropData)
+                seenNames[baseName] = table.getn(filteredData)
+            else
+                local canon = CANONICAL_ZONE[baseName]
+                if canon and data.zoneName == canon then
+                    local dropData = {}
+                    for k, v in pairs(data) do dropData[k] = v end
+                    dropData.name = baseName
+                    filteredData[existingIndex] = dropData
+                end
+            end
+        end
+    end
+
+    MMM.FlatDropdownData = filteredData
+    return filteredData
+end
+
+-- Drawing Logic
+function MMM:RefreshMarkers()
+    if not WorldMapFrame:IsVisible() then return end
+    self:RefreshMarkersInner()
+    self:UpdateWaypointPin()
+end
+
+function MMM:RefreshMarkersInner()
+    if not WorldMapFrame:IsVisible() then return end
+
+    self:BuildData()
+
+    local currentContinent = GetCurrentMapContinent()
+    local currentZone      = GetCurrentMapZone()
+
+    -- Dirty-check: skip full redraw if zone hasn't changed and no force refresh
+    if not forceRefresh
+       and currentContinent == lastContinent
+       and currentZone == lastZone then
+        return
+    end
+
+    lastContinent = currentContinent
+    lastZone      = currentZone
+    forceRefresh  = false
+
+    if currentContinent == 0 or currentZone == 0 then
+        self:HideAllMarkers()
+        return
+    end
+
+    local zoneNames      = ZONE_CACHE[currentContinent]
+    local currentZoneName = zoneNames and zoneNames[currentZone]
+    if not currentZoneName then
+        self:HideAllMarkers()
+        return
+    end
+
+    -- Translate localized zone name to English key used in MarkerData
+    local englishZoneName = L:GetEnglishZoneName(currentZoneName)
+
+    local zoneMarkers = MMM.ZoneMarkers[currentContinent] and MMM.ZoneMarkers[currentContinent][englishZoneName]
+
+    local markerIndex = 0
+    local now = GetTime()
+
+    if zoneMarkers then
+        for _, data in ipairs(zoneMarkers) do
+
+            local showMarker = (MMM.filters[data.type] == true)
+
+            -- Hide markers replaced by InstanceJournal
+            if showMarker and MMM.ijInstalled then
+                if data.type == "WORLDBOSS" then
+                    showMarker = false
+                elseif IJ_HIDDEN_MARKERS[data.name] then
+                    showMarker = false
+                end
+            end
+
+            -- Check faction filter
+            if showMarker and (data.type == "BOAT" or data.type == "ZEPPELIN" or data.type == "TRAM") then
+                if MMM.filters.FACTION ~= "ALL"
+                   and data.description ~= "Neutral"
+                   and data.description ~= MMM.filters.FACTION then
+                    showMarker = false
+                end
+            end
+
+            if showMarker then
+                markerIndex = markerIndex + 1
+                local marker = self:GetOrCreateMarker(markerIndex)
+
+                -- Sizing
+                if data.type == "DUNGEON" or data.type == "RAID" or data.type == "WORLDBOSS" then
+                    marker:SetWidth(32)
+                    marker:SetHeight(32)
+                else
+                    marker:SetWidth(24)
+                    marker:SetHeight(24)
+                end
+
+                -- Position
+                local width  = WorldMapDetailFrame:GetWidth()
+                local height = WorldMapDetailFrame:GetHeight()
+                marker:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", data.x * width, -data.y * height)
+
+                -- Texture
+                local tex = TEXTURE_MAP[data.type] or "Interface\\Minimap\\POIIcons"
+                if marker.lastTexture ~= tex then
+                    marker.texture:SetTexture(tex)
+                    marker.lastTexture = tex
+                end
+
+                local hlTex = HIGHLIGHT_MAP[data.type]
+                if marker.lastHighlight ~= hlTex then
+                    if hlTex then
+                        marker:SetHighlightTexture(hlTex)
+                    elseif marker.lastHighlight then
+                        marker:SetHighlightTexture("")
+                    end
+                    marker.lastHighlight = hlTex
+                end
+
+                -- Metadata
+                marker.name        = L:GetLocalizedMarkerName(data.name)
+                marker.nameEN      = data.name
+                marker.description = data.description
+                marker.markerType  = data.type
+                marker.continent   = data.continent
+                marker.zoneName    = data.zoneName
+                marker.posX        = data.x
+                marker.posY        = data.y
+
+                -- Dim dungeons/raids this character is already saved to
+                local locked = (data.type == "DUNGEON" or data.type == "RAID") and MMM:GetLockout(data.name)
+                if locked then
+                    marker.texture:SetVertexColor(0.55, 0.55, 0.55)
+                else
+                    marker.texture:SetVertexColor(1, 1, 1)
+                end
+
+                -- "Find Marker" pulse
+                if MMM.highlightBase and now < MMM.highlightUntil and BaseName(data.name) == MMM.highlightBase then
+                    marker.glow:Show()
+                    marker.glowOn = true
+                else
+                    marker.glow:Hide()
+                    marker.glowOn = false
+                end
+
+                marker:Show()
+            end
+        end
+    end
+
+    -- Hide any excess markers from the previous zone
+    self:HideMarkersFrom(markerIndex + 1)
+end
+
+-- Hide all markers in the pool
+function MMM:HideAllMarkers()
+    self:HideMarkersFrom(1)
+end
+
+-- Hide markers from startIndex onwards
+function MMM:HideMarkersFrom(startIndex)
+    for i = startIndex, table.getn(self.markers) do
+        if self.markers[i] then
+            self.markers[i]:Hide()
+        end
+    end
+end
+
+-- Invalidate dirty-check so next RefreshMarkers does a full redraw
+function MMM:InvalidateCache()
+    forceRefresh = true
+end
+
+-- Get IJ instance from MMM marker English name
+function MMM:GetIJInstance(nameEN)
+    if not MMM.ijInstalled or not nameEN then return nil end
+    local mapping = MMM_TO_IJ[nameEN]
+    if not mapping then return nil end
+    local dbTable = (mapping.db == "R") and IJDB.R or IJDB.DG
+    if not dbTable then return nil end
+    return dbTable[mapping.key]
+end
+
+-- InstanceJournal Integration
+function MMM:OnMarkerClick(marker, button)
+    -- Ctrl+Left-click: drop a waypoint on this marker (needs ClassicAPI)
+    if button == "LeftButton" and IsControlKeyDown() then
+        if MMM:SetWaypointToMarker(marker) then return end
+    end
+
+    if not MMM.ijInstalled then return end
+
+    local instance = MMM:GetIJInstance(marker.nameEN)
+    if not instance then return end
+
+    if button == "RightButton" then
+        -- Right-click: open IJ journal page
+        if not IJ_InstanceJournalFrame:IsShown() then
+            IJ_InstanceJournalFrame:Show()
+        end
+        if instance.Type == IJLib.InstanceType.Raid then
+            IJ_ShowRaids = true
+            PanelTemplates_SetTab(IJ_InstanceJournalFrame, 2)
+        else
+            IJ_ShowRaids = false
+            PanelTemplates_SetTab(IJ_InstanceJournalFrame, 1)
+        end
+        IJ_ShowEncounter(instance)
+        WorldMapFrame:Hide()
+    else
+        -- Left-click: navigate to instance submap
+        SetMapZoom(tonumber(instance.MapId), 1)
+    end
+end
+
+function MMM:ShowMarkerTooltip(m)
+    WorldMapTooltip:SetOwner(m, "ANCHOR_RIGHT")
+    WorldMapTooltip:AddLine(m.name, 1, 0.82, 0)
+
+    local isInstance = (m.markerType == "DUNGEON" or m.markerType == "RAID" or m.markerType == "WORLDBOSS")
+    if m.description then
+        if isInstance then
+            WorldMapTooltip:AddLine(T("Level") .. ": " .. m.description, 1, 1, 1, 1)
+        elseif m.description == "Alliance" then
+            WorldMapTooltip:AddLine(T("Alliance"), 0.0, 0.47, 1.0, 1)
+        elseif m.description == "Horde" then
+            WorldMapTooltip:AddLine(T("Horde"), 1.0, 0.0, 0.0, 1)
+        else
+            WorldMapTooltip:AddLine(T(m.description), 1, 1, 1, 1)
+        end
+    end
+
+    -- Saved-instance lockout
+    if m.markerType == "DUNGEON" or m.markerType == "RAID" then
+        local remain = MMM:GetLockout(m.nameEN)
+        if remain then
+            WorldMapTooltip:AddLine(T("Saved") .. ": " .. FormatDuration(remain), 1, 0.4, 0.4)
+        end
+    end
+
+    -- Live distance (needs ClassicAPI C_Map; silently skipped otherwise)
+    local id = MMM:GetMapIDForZone(m.continent, m.zoneName)
+    local d = id and MMM:GetDistanceYards(id, m.posX, m.posY)
+    if d then
+        WorldMapTooltip:AddLine("~" .. math.floor(d + 0.5) .. " " .. T("yd away"), 0.6, 0.9, 0.6)
+    end
+
+    if MMM.ijInstalled and MMM:GetIJInstance(m.nameEN) then
+        WorldMapTooltip:AddLine(T("Left-Click: View Map"), 0.5, 0.5, 0.5)
+        WorldMapTooltip:AddLine(T("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
+    end
+    if HasWaypointAPI() then
+        WorldMapTooltip:AddLine(T("Ctrl+Click: Set Waypoint"), 0.5, 0.5, 0.5)
+    end
+
+    WorldMapTooltip:Show()
+end
+
+-- Marker Pool
+function MMM:GetOrCreateMarker(index)
+    if not self.markers[index] then
+        local marker = CreateFrame("Button", "ModernMapMarkerIcon"..index, WorldMapButton)
+        marker:SetWidth(24)
+        marker:SetHeight(24)
+        marker:SetFrameLevel(WorldMapButton:GetFrameLevel() + 5)
+
+        local tex = marker:CreateTexture(nil, "OVERLAY")
+        tex:SetAllPoints(marker)
+        marker.texture = tex
+
+        -- Pulse ring used by "Find Marker"
+        local glow = marker:CreateTexture(nil, "OVERLAY")
+        glow:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+        glow:SetBlendMode("ADD")
+        glow:SetWidth(52)
+        glow:SetHeight(52)
+        glow:SetPoint("CENTER", marker, "CENTER", 0, 0)
+        glow:Hide()
+        marker.glow = glow
+
+        marker:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        marker:SetScript("OnClick", function() MMM:OnMarkerClick(this, arg1) end)
+
+        HookTooltip(marker, function(f) MMM:ShowMarkerTooltip(f) end)
+
+        self.markers[index] = marker
+    end
+    return self.markers[index]
+end
+
+-- Hooks & API
+function ModernMapMarkers_SetFilter(key, state)
+    if key == "ALL" then
+        for _, t in ipairs(ALL_TYPES) do
+            MMM.filters[t] = state
+        end
+    else
+        MMM.filters[key] = state
+    end
+    MMM:InvalidateCache()
+    MMM:RefreshMarkers()
+end
+
+function ModernMapMarkers_SetFactionFilter(factionStr)
+    MMM.filters.FACTION = factionStr
+    MMM:InvalidateCache()
+    MMM:RefreshMarkers()
+end
+
+function MMM:GetZoneIndex(continentID, zoneName)
+    local zones = ZONE_CACHE[continentID] or {}
+    -- zoneName is English (from MarkerData), ZONE_CACHE has localized names
+    local localizedName = L:GetLocalizedZoneName(zoneName)
+    for i, name in ipairs(zones) do
+        if name == localizedName then return i end
+    end
+    -- Fallback: try direct match (for enUS or untranslated zones)
+    for i, name in ipairs(zones) do
+        if name == zoneName then return i end
+    end
+    return 0
+end
+
+function ModernMapMarkers_FindMarker(dataIndex)
+    MMM:BuildData()
+    local data = MMM.Data[dataIndex]
+    if not data then return end
+
+    local zoneIndex = MMM:GetZoneIndex(data.continent, data.zoneName)
+    if zoneIndex > 0 then
+        SetMapZoom(data.continent, zoneIndex)
+    end
+
+    if not MMM.filters[data.type] then
+        MMM.filters[data.type] = true
+        if ModernMapMarkers_SyncFilterUI then
+            ModernMapMarkers_SyncFilterUI(data.type, true)
+        end
+    end
+
+    MMM:StartHighlight(BaseName(data.name))
+    MMM:InvalidateCache()
+    MMM:RefreshMarkers()
+end
+
+local original_WorldMapFrame_Update = WorldMapFrame_Update
+function WorldMapFrame_Update()
+    if original_WorldMapFrame_Update then
+        original_WorldMapFrame_Update()
+    end
+    MMM:RefreshMarkers()
+end
+
+MMM:SetScript("OnEvent", function()
+    if event == "VARIABLES_LOADED" then
+        if ModernMapMarkersDB and ModernMapMarkersDB.filters then
+            for k, v in pairs(ModernMapMarkersDB.filters) do
+                MMM.filters[k] = v
+            end
+        else
+            -- First load: auto-detect player faction for transport filter
+            local faction = UnitFactionGroup("player")
+            if faction == "Alliance" or faction == "Horde" then
+                MMM.filters.FACTION = faction
+            end
+        end
+
+        L:Initialize()
+        MMM:CacheZones()
+        MMM:BuildData()
+
+        -- Detect InstanceJournal
+        if IJDB and IJLib and IJ_ShowInstanceEntrancesIcon then
+            MMM.ijInstalled = true
+
+            -- Build POI submap zone lookup
+            if IJDB.POI then
+                for _, poi in pairs(IJDB.POI) do
+                    if poi.MapContinentId and poi.MapZoneId then
+                        local key = tostring(poi.MapContinentId) .. ":" .. tostring(poi.MapZoneId)
+                        IJ_SUBMAP_ZONES[key] = true
+                    end
+                end
+            end
+
+            -- Also include instance entrance locations inside other instance maps
+            -- (e.g., Molten Core entrance inside BRD submap)
+            local instanceMapIds = {}
+            local allInstances = {}
+            for _, inst in pairs(IJDB.DG or {}) do
+                if inst.MapId then instanceMapIds[tostring(inst.MapId)] = true end
+                table.insert(allInstances, inst)
+            end
+            for _, inst in pairs(IJDB.R or {}) do
+                if inst.MapId then instanceMapIds[tostring(inst.MapId)] = true end
+                table.insert(allInstances, inst)
+            end
+            for _, inst in ipairs(allInstances) do
+                if inst.Entrances then
+                    for _, ent in pairs(inst.Entrances) do
+                        if ent.MapContinentId and ent.MapZoneId
+                           and instanceMapIds[tostring(ent.MapContinentId)] then
+                            local key = tostring(ent.MapContinentId) .. ":" .. tostring(ent.MapZoneId)
+                            IJ_SUBMAP_ZONES[key] = true
+                        end
+                    end
+                end
+            end
+
+            -- Hook IJ entrance markers: hide on world zones, keep in POI submaps
+            -- In submaps, reskin entrance pins with MMM dungeon/raid textures
+            local original_ShowEntrance = IJ_ShowInstanceEntrancesIcon
+            IJ_ShowInstanceEntrancesIcon = function(instance)
+                local key = tostring(GetCurrentMapContinent()) .. ":" .. tostring(GetCurrentMapZone())
+                if IJ_SUBMAP_ZONES[key] then
+                    original_ShowEntrance(instance)
+
+                    -- Determine marker type and apply MMM filter
+                    local isRaid = instance.Type == IJLib.InstanceType.Raid
+                    local filterKey = isRaid and "RAID" or "DUNGEON"
+                    local mmmTex = isRaid and TEXTURE_MAP.RAID or TEXTURE_MAP.DUNGEON
+
+                    local cleanName = string.gsub(instance.Name or "", "%s+", "")
+                    local prefix = "IJ_EntrancePin_" .. cleanName
+
+                    for _, pin in ipairs(IJ_CreatedMapInstanceEntrance) do
+                        local pinName = pin:GetName() or ""
+                        if string.find(pinName, prefix, 1, true) and pin:IsVisible() then
+                            -- Hide pin if MMM filter is disabled for this type
+                            if not MMM.filters[filterKey] then
+                                pin:Hide()
+                            end
+                            pin.icon:SetTexture(mmmTex)
+                            pin.mmmInstance = instance
+
+                            if not pin.mmmReskinned then
+                                pin.mmmReskinned = true
+                                pin.mmmTexture = mmmTex
+
+                                local mmmHL = instance.Type == IJLib.InstanceType.Raid and HIGHLIGHT_MAP.RAID or HIGHLIGHT_MAP.DUNGEON
+                                if mmmHL then
+                                    pin:SetHighlightTexture(mmmHL)
+                                end
+
+                                local origOnEnter = pin:GetScript("OnEnter")
+                                local origOnLeave = pin:GetScript("OnLeave")
+
+                                pin:SetScript("OnEnter", function()
+                                    if origOnEnter then origOnEnter() end
+                                    this.icon:SetTexture(this.mmmTexture)
+
+                                    -- MMM tooltip for IJ POI submap markers
+                                    local inst = this.mmmInstance
+                                    if inst then
+                                        WorldMapTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                                        WorldMapTooltip:AddLine(inst.Name or "", 1, 0.82, 0)
+                                        local minLvl = inst.MinLevel or 0
+                                        local maxLvl = inst.MaxLevel or 0
+                                        local lvlLabel = L:GetLocalizedMarkerName("Level") or "Level"
+                                        WorldMapTooltip:AddLine(lvlLabel .. ": " .. minLvl .. "-" .. maxLvl, 1, 1, 1, 1)
+                                        WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Left-Click: View Map"), 0.5, 0.5, 0.5)
+                                        WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
+                                        WorldMapTooltip:Show()
+                                    end
+                                end)
+
+                                pin:SetScript("OnLeave", function()
+                                    if origOnLeave then origOnLeave() end
+                                    this.icon:SetTexture(this.mmmTexture)
+                                    WorldMapTooltip:Hide()
+                                end)
+
+                                -- Right click for IJ journal
+                                pin:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+                                local origOnClick = pin:GetScript("OnClick")
+                                pin:SetScript("OnClick", function()
+                                    if arg1 == "RightButton" and this.mmmInstance then
+                                        local inst = this.mmmInstance
+                                        if not IJ_InstanceJournalFrame:IsShown() then
+                                            IJ_InstanceJournalFrame:Show()
+                                        end
+                                        if inst.Type == IJLib.InstanceType.Raid then
+                                            IJ_ShowRaids = true
+                                            PanelTemplates_SetTab(IJ_InstanceJournalFrame, 2)
+                                        else
+                                            IJ_ShowRaids = false
+                                            PanelTemplates_SetTab(IJ_InstanceJournalFrame, 1)
+                                        end
+                                        IJ_ShowEncounter(inst)
+                                        WorldMapFrame:Hide()
+                                    else
+                                        if origOnClick then origOnClick() end
+                                    end
+                                end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        MMM:ScanLockouts()
+        if RequestRaidInfo then RequestRaidInfo() end
+
+        MMM:InvalidateCache()
+        MMM:RefreshMarkers()
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        if RequestRaidInfo then RequestRaidInfo() end
+
+    elseif event == "UPDATE_INSTANCE_INFO" then
+        MMM:ScanLockouts()
+        MMM:InvalidateCache()
+        MMM:RefreshMarkers()
+
+    elseif event == "USER_WAYPOINT_UPDATED" then
+        MMM:UpdateWaypointPin()
+
+    elseif event == "PLAYER_LOGOUT" then
+        if not ModernMapMarkersDB then ModernMapMarkersDB = {} end
+        ModernMapMarkersDB.filters = {}
+        for k, v in pairs(MMM.filters) do
+            ModernMapMarkersDB.filters[k] = v
+        end
+    end
+end)
+MMM:RegisterEvent("VARIABLES_LOADED")
+MMM:RegisterEvent("PLAYER_LOGOUT")
+MMM:RegisterEvent("UPDATE_INSTANCE_INFO")
+MMM:RegisterEvent("PLAYER_ENTERING_WORLD")
+-- Only exists with ClassicAPI; registering an unknown event is harmless in 1.12
+MMM:RegisterEvent("USER_WAYPOINT_UPDATED")
