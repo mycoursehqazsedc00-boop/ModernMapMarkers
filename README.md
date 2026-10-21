@@ -56,7 +56,6 @@ The folder must contain a `Textures` directory with `dungeon.tga`, `raid.tga`, `
 - Distance and waypoints rely on matching zone names between `GetMapZones()` and ClassicAPI's map list. A custom zone ClassicAPI does not list simply gets no waypoint or distance.
 - With InstanceJournal installed, markers that IJ covers are hidden, so the Find pulse cannot show on them.
 - Lockout matching uses the instance name before " - " (for example "Dire Maul"), ignores case, punctuation and a leading "The", and knows a few alternative names. If an instance still does not grey out, run `/mmmlock` and report the names it lists.
-- 2.5 and 2.6 were tested on a mock client only, not in the real game; please report issues.
 
 ## Credits
 Authors: tilr & Heallios<br>
