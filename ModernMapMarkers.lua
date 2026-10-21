@@ -382,29 +382,165 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Instance lockouts (stock 1.12 API - no client mod needed)
+--
+-- The client only knows your saved instances once the server has answered RequestRaidInfo(), and the
+-- UPDATE_INSTANCE_INFO event is not something to depend on alone. So the list is read again whenever it
+-- can matter: when the map opens, when the event arrives, on a timer while the map is open (this also
+-- notices a lockout expiring), after zoning and a few seconds after login.
 -- ---------------------------------------------------------------------------
-local lockouts = {}
+local lockouts = {}              -- normalised instance name -> { raw, reset (s), t (GetTime at first sight), name }
+local lockoutSignature = ""
+local LOCKOUT_REQUEST_EVERY = 30 -- seconds between RequestRaidInfo() calls
+local LOCKOUT_RESCAN_EVERY  = 20 -- seconds between re-reads while the map is open
 
-function MMM:ScanLockouts()
-    if type(GetNumSavedInstances) ~= "function" or type(GetSavedInstanceInfo) ~= "function" then return end
-    lockouts = {}
-    local now = GetTime()
-    for i = 1, GetNumSavedInstances() do
-        local name, id, reset = GetSavedInstanceInfo(i)
-        if name then
-            lockouts[name] = { reset = tonumber(reset) or 0, t = now }
-        end
-    end
+-- "The Deadmines" / "Deadmines" / "dire maul" -> one comparable key (keeps UTF-8 bytes of other locales)
+local function NormName(name)
+    local n = string.lower(name or "")
+    n = string.gsub(n, "^the ", "")
+    n = string.gsub(n, "[%s%p]", "")
+    if n == "" then n = string.lower(name or "") end
+    return n
 end
 
--- Seconds until the lockout for this marker resets, or nil when not saved
+-- other names the game may use for the same instance (keys and values are NormName results)
+local LOCKOUT_ALIASES = {
+    towerofkarazhan     = { "upperkarazhanhalls" },
+    lowerkarazhanhalls  = { "karazhanlower" },
+    stockade            = { "stormwindstockade" },
+    ruinsofahnqiraj     = { "ahnqirajruins", "aq20" },
+    templeofahnqiraj    = { "ahnqirajtemple", "aq40" },
+    onyxiaslair         = { "onyxia" },
+}
+
+function MMM:ScanLockouts()
+    if type(GetNumSavedInstances) ~= "function" or type(GetSavedInstanceInfo) ~= "function" then return false end
+    local now = GetTime()
+    local new = {}
+    local keys = {}
+    for i = 1, (GetNumSavedInstances() or 0) do
+        local name, id, reset = GetSavedInstanceInfo(i)
+        if name then
+            local key = NormName(name)
+            local raw = tonumber(reset) or 0
+            local old = lockouts[key]
+            -- some clients report a fixed number, others a live countdown: keep counting from the first sighting
+            local t = now
+            if old and old.raw == raw then t = old.t end
+            if raw - (now - t) > 0 then
+                new[key] = { raw = raw, reset = raw, t = t, name = name }
+                table.insert(keys, key .. ":" .. math.floor((t + raw) / 10))
+            end
+        end
+    end
+    table.sort(keys)
+    local sig = table.concat(keys, "|")
+    lockouts = new
+    local changed = (sig ~= lockoutSignature)
+    lockoutSignature = sig
+    return changed
+end
+
+-- Seconds until the lockout for this marker/instance name resets, or nil when not saved
 function MMM:GetLockout(nameEN)
     local base = BaseName(nameEN)
-    local rec = lockouts[L:GetLocalizedMarkerName(base)] or lockouts[base]
+    local rec = lockouts[NormName(L:GetLocalizedMarkerName(base))] or lockouts[NormName(base)]
+    if not rec then
+        local alts = LOCKOUT_ALIASES[NormName(base)]
+        if alts then
+            for i = 1, table.getn(alts) do
+                rec = lockouts[alts[i]]
+                if rec then break end
+            end
+        end
+    end
     if not rec then return nil end
     local remaining = rec.reset - (GetTime() - rec.t)
     if remaining <= 0 then return nil end
     return remaining
+end
+
+-- ask the server for fresh data (throttled unless forced)
+function MMM:RequestLockouts(force)
+    if type(RequestRaidInfo) ~= "function" then return end
+    local now = GetTime()
+    if (not force) and self.lastRaidInfoRequest and (now - self.lastRaidInfoRequest) < LOCKOUT_REQUEST_EVERY then return end
+    self.lastRaidInfoRequest = now
+    RequestRaidInfo()
+end
+
+-- re-read and redraw when something changed (or when forced)
+function MMM:UpdateLockouts(force)
+    local changed = self:ScanLockouts()
+    if changed or force then
+        self:InvalidateCache()
+        self:RefreshMarkers()
+    end
+    return changed
+end
+
+-- dimmed + desaturated icon for a saved instance (works on clients without desaturation too)
+function MMM:ApplyLockoutVisual(tex, locked)
+    if locked then
+        tex:SetVertexColor(0.6, 0.6, 0.6)
+        if tex.SetDesaturated then tex:SetDesaturated(1) end
+    else
+        tex:SetVertexColor(1, 1, 1)
+        if tex.SetDesaturated then tex:SetDesaturated(nil) end
+    end
+end
+
+-- while the world map is open: re-read every so often (new lockout, expiry), and stop when it closes
+function MMM:StartLockoutTimer()
+    self.lockoutElapsed = 0
+    self:SetScript("OnUpdate", function()
+        if not WorldMapFrame:IsVisible() then
+            MMM.mapOpen = false
+            this:SetScript("OnUpdate", nil)
+            return
+        end
+        MMM.lockoutElapsed = (MMM.lockoutElapsed or 0) + arg1
+        if MMM.lockoutElapsed >= LOCKOUT_RESCAN_EVERY then
+            MMM.lockoutElapsed = 0
+            MMM:RequestLockouts(false)
+            MMM:UpdateLockouts(false)
+        end
+    end)
+end
+
+-- called from the world map update hook: when the map opens, and again on every later update (zone
+-- change etc.), read the saved instances so a zone change or a re-open always shows current lockouts.
+-- The read is a loop over a handful of entries.
+function MMM:OnMapUpdate()
+    if not WorldMapFrame:IsVisible() then return end
+    local now = GetTime()
+    if not self.mapOpen then
+        self.mapOpen = true
+        self:RequestLockouts(false)
+        self.lastMapScan = now
+        if self:ScanLockouts() then self:InvalidateCache() end
+        self:StartLockoutTimer()
+    elseif now ~= self.lastMapScan then   -- more than once per frame would be pointless
+        self.lastMapScan = now
+        if self:ScanLockouts() then self:InvalidateCache() end
+    end
+end
+
+-- a few delayed asks after login / zoning, because the answer is not there yet at that moment
+function MMM:ScheduleLockoutRequests()
+    self.retryAt = { GetTime() + 6, GetTime() + 25 }
+    if not self.retryFrame then self.retryFrame = CreateFrame("Frame") end
+    self.retryFrame:SetScript("OnUpdate", function()
+        local now = GetTime()
+        local list = MMM.retryAt
+        if not list or table.getn(list) == 0 then
+            this:SetScript("OnUpdate", nil)
+            return
+        end
+        if now >= list[1] then
+            table.remove(list, 1)
+            MMM:RequestLockouts(true)
+        end
+    end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -641,11 +777,7 @@ function MMM:RefreshMarkersInner()
 
                 -- Dim dungeons/raids this character is already saved to
                 local locked = (data.type == "DUNGEON" or data.type == "RAID") and MMM:GetLockout(data.name)
-                if locked then
-                    marker.texture:SetVertexColor(0.55, 0.55, 0.55)
-                else
-                    marker.texture:SetVertexColor(1, 1, 1)
-                end
+                MMM:ApplyLockoutVisual(marker.texture, locked)
 
                 -- "Find Marker" pulse
                 if MMM.highlightBase and now < MMM.highlightUntil and BaseName(data.name) == MMM.highlightBase then
@@ -861,6 +993,7 @@ function WorldMapFrame_Update()
     if original_WorldMapFrame_Update then
         original_WorldMapFrame_Update()
     end
+    MMM:OnMapUpdate()
     MMM:RefreshMarkers()
 end
 
@@ -945,6 +1078,7 @@ MMM:SetScript("OnEvent", function()
                             end
                             pin.icon:SetTexture(mmmTex)
                             pin.mmmInstance = instance
+                            MMM:ApplyLockoutVisual(pin.icon, MMM:GetLockout(instance.Name or ""))
 
                             if not pin.mmmReskinned then
                                 pin.mmmReskinned = true
@@ -971,6 +1105,10 @@ MMM:SetScript("OnEvent", function()
                                         local maxLvl = inst.MaxLevel or 0
                                         local lvlLabel = L:GetLocalizedMarkerName("Level") or "Level"
                                         WorldMapTooltip:AddLine(lvlLabel .. ": " .. minLvl .. "-" .. maxLvl, 1, 1, 1, 1)
+                                        local ijLock = MMM:GetLockout(inst.Name or "")
+                                        if ijLock then
+                                            WorldMapTooltip:AddLine(T("Saved") .. ": " .. FormatDuration(ijLock), 1, 0.4, 0.4)
+                                        end
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Left-Click: View Map"), 0.5, 0.5, 0.5)
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
                                         WorldMapTooltip:Show()
@@ -1013,18 +1151,26 @@ MMM:SetScript("OnEvent", function()
         end
 
         MMM:ScanLockouts()
-        if RequestRaidInfo then RequestRaidInfo() end
+        MMM:RequestLockouts(true)
 
         MMM:InvalidateCache()
         MMM:RefreshMarkers()
 
     elseif event == "PLAYER_ENTERING_WORLD" then
-        if RequestRaidInfo then RequestRaidInfo() end
+        MMM:RequestLockouts(true)
+        MMM:ScheduleLockoutRequests()
 
     elseif event == "UPDATE_INSTANCE_INFO" then
-        MMM:ScanLockouts()
-        MMM:InvalidateCache()
-        MMM:RefreshMarkers()
+        MMM:UpdateLockouts(true)
+
+    elseif event == "ZONE_CHANGED_NEW_AREA" or event == "RAID_INSTANCE_WELCOME" then
+        MMM:RequestLockouts(event == "RAID_INSTANCE_WELCOME")
+
+    elseif event == "CHAT_MSG_SYSTEM" then
+        -- "You are now saved to this instance" / an instance was reset: ask again soon
+        if arg1 and string.find(string.lower(arg1), "saved", 1, true) or (arg1 and string.find(string.lower(arg1), "reset", 1, true)) then
+            MMM:ScheduleLockoutRequests()
+        end
 
     elseif event == "USER_WAYPOINT_UPDATED" then
         MMM:UpdateWaypointPin()
@@ -1041,5 +1187,37 @@ MMM:RegisterEvent("VARIABLES_LOADED")
 MMM:RegisterEvent("PLAYER_LOGOUT")
 MMM:RegisterEvent("UPDATE_INSTANCE_INFO")
 MMM:RegisterEvent("PLAYER_ENTERING_WORLD")
+MMM:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+MMM:RegisterEvent("RAID_INSTANCE_WELCOME")
+MMM:RegisterEvent("CHAT_MSG_SYSTEM")
 -- Only exists with ClassicAPI; registering an unknown event is harmless in 1.12
 MMM:RegisterEvent("USER_WAYPOINT_UPDATED")
+
+-- /mmmlock : show what the game reports as saved, and which map icons it matched
+SLASH_MMMLOCK1 = "/mmmlock"
+SlashCmdList["MMMLOCK"] = function()
+    MMM:RequestLockouts(true)
+    MMM:UpdateLockouts(true)
+    local n = 0
+    if type(GetNumSavedInstances) == "function" then n = GetNumSavedInstances() or 0 end
+    Msg("saved instances reported by the game: " .. n)
+    for i = 1, n do
+        local name, id, reset = GetSavedInstanceInfo(i)
+        if name then
+            local left = tonumber(reset) or 0
+            DEFAULT_CHAT_FRAME:AddMessage("   " .. name .. "  (resets in " .. FormatDuration(left) .. ")")
+        end
+    end
+    local matched = 0
+    for _, d in pairs(MMM.Data or {}) do
+        if (d.type == "DUNGEON" or d.type == "RAID") and MMM:GetLockout(d.name) then
+            matched = matched + 1
+            DEFAULT_CHAT_FRAME:AddMessage("   map icon greyed: " .. d.name)
+        end
+    end
+    if n == 0 then
+        Msg("nothing saved yet. If you ARE saved somewhere, the game has not sent the raid info; open the Raid Info panel once and run /mmmlock again.")
+    elseif matched == 0 then
+        Msg("saved instances found but none matches a map icon name; please report the names listed above.")
+    end
+end

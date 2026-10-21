@@ -2,7 +2,7 @@
 
 Places markers on the world map to show the locations of dungeons, raids, world bosses, boats, zeppelins and trams. Supports enUS, esES, deDE, ptBR and zhCN clients.
 
-**Version 2.5** – adds live distance, map waypoints, saved-instance lockouts and a Find-marker highlight. The new features that rely on a client mod switch themselves off if it is missing, so the addon still works on a stock 1.12 client.
+**Version 2.6** – fixes saved-instance lockouts (greyed icons and reset timers now appear and stay up to date). Version 2.5 added live distance, map waypoints and a Find-marker highlight. The new features that rely on a client mod switch themselves off if it is missing, so the addon still works on a stock 1.12 client.
 
 ## Features
 
@@ -20,7 +20,7 @@ Places markers on the world map to show the locations of dungeons, raids, world 
 ### New in 2.5
 - **Live distance** – marker tooltips show `~N yd away`, refreshed twice a second while hovered. Shown only when you are in the marker's zone.
 - **Map waypoint** – **Ctrl+Left-click** a marker to set a waypoint. A cross pin is drawn on the world map with its own live distance tooltip; **right-click the pin** to clear it.
-- **Saved-instance lockouts** – dungeons and raids you are saved to are greyed out and the tooltip shows the reset timer.
+- **Saved-instance lockouts** – dungeons and raids you are saved to are greyed out (desaturated and dimmed) and the tooltip shows the time until reset. Works on InstanceJournal's entrance pins too. In 2.6 the saved list is re-read when the map opens, on every zone change, every 20 seconds while the map is open, after zoning, and when the server answers, and it asks the server again whenever the map opens.
 - **Find Marker highlight** – the marker you picked pulses for 8 seconds.
 - **New translated strings** for all supported locales.
 
@@ -50,12 +50,13 @@ The folder must contain a `Textures` directory with `dungeon.tga`, `raid.tga`, `
 | Ctrl+Left-click a marker | Set a map waypoint (ClassicAPI) |
 | Right-click the waypoint pin | Clear the waypoint |
 | `/mmm` | Toggle dropdown menus |
+| `/mmmlock` | Show the saved instances the game reports and which map icons they matched (use it if an icon does not grey out) |
 
 ## Known limitations
 - Distance and waypoints rely on matching zone names between `GetMapZones()` and ClassicAPI's map list. A custom zone ClassicAPI does not list simply gets no waypoint or distance.
 - With InstanceJournal installed, markers that IJ covers are hidden, so the Find pulse cannot show on them.
-- Lockout matching uses the instance name before " - " (for example "Dire Maul"). Lockout dimming is refreshed when the server sends saved-instance info, not while the map stays open.
-- 2.5 has not been tested in-game by the author of the changes; please report issues.
+- Lockout matching uses the instance name before " - " (for example "Dire Maul"), ignores case, punctuation and a leading "The", and knows a few alternative names. If an instance still does not grey out, run `/mmmlock` and report the names it lists.
+- 2.5 and 2.6 were tested on a mock client only, not in the real game; please report issues.
 
 ## Credits
 Authors: tilr & Heallios<br>
