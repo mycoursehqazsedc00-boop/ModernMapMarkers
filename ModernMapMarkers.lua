@@ -468,9 +468,16 @@ function MMM:RequestLockouts(force)
     RequestRaidInfo()
 end
 
+-- saved raids AND remembered dungeons: read/expire both, report whether anything changed
+function MMM:ScanAll()
+    local changed = self:ScanLockouts()
+    if self.PruneDungeons and self:PruneDungeons() then changed = true end
+    return changed
+end
+
 -- re-read and redraw when something changed (or when forced)
 function MMM:UpdateLockouts(force)
-    local changed = self:ScanLockouts()
+    local changed = self:ScanAll()
     if changed or force then
         self:InvalidateCache()
         self:RefreshMarkers()
@@ -517,11 +524,11 @@ function MMM:OnMapUpdate()
         self.mapOpen = true
         self:RequestLockouts(false)
         self.lastMapScan = now
-        if self:ScanLockouts() then self:InvalidateCache() end
+        if self:ScanAll() then self:InvalidateCache() end
         self:StartLockoutTimer()
     elseif now ~= self.lastMapScan then   -- more than once per frame would be pointless
         self.lastMapScan = now
-        if self:ScanLockouts() then self:InvalidateCache() end
+        if self:ScanAll() then self:InvalidateCache() end
     end
 end
 
@@ -541,6 +548,248 @@ function MMM:ScheduleLockoutRequests()
             MMM:RequestLockouts(true)
         end
     end)
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Active dungeon instances
+--
+-- 5-man dungeons are not saved lockouts, so Raid Info never lists them. What a dungeon has is a live
+-- instance you stay attached to until it is reset (ResetInstances(), the party leader, or the server).
+-- This remembers the dungeons you have entered, greys their icons while they are active, and forgets
+-- them when the game says "<name> has been reset." or after a manual reset. Remembered per character.
+-- ---------------------------------------------------------------------------
+local DUNGEON_IDLE_RESET = 3600  -- ASSUMPTION: an instance nobody is inside resets about an hour later
+local RESET_WINDOW = 3           -- seconds after ResetInstances() in which the game's replies are collected
+
+local function FormatToPattern(fmt)
+    fmt = string.gsub(fmt, "%%s", "\1")
+    fmt = string.gsub(fmt, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+    fmt = string.gsub(fmt, "\1", "(.+)")
+    return "^" .. fmt .. "$"
+end
+local RESET_OK_PATTERN   = FormatToPattern(INSTANCE_RESET_SUCCESS or "%s has been reset.")
+-- the failure text continues after the name ("... There are players still inside the instance.")
+local RESET_FAIL_PREFIX  = string.gsub(INSTANCE_RESET_FAILED or "Cannot reset %s.", "%%s.*$", "")
+
+function MMM:DungeonTrackingEnabled()
+    return not (ModernMapMarkersDB and ModernMapMarkersDB.trackDungeons == false)
+end
+
+function MMM:DungeonStore()
+    -- on a first run the saved-variables table does not exist yet (it is normally created at logout)
+    if not ModernMapMarkersDB then ModernMapMarkersDB = {} end
+    ModernMapMarkersDB.instances = ModernMapMarkersDB.instances or {}
+    local key = (UnitName("player") or "?") .. "-" .. ((GetRealmName and GetRealmName()) or "?")
+    ModernMapMarkersDB.instances[key] = ModernMapMarkersDB.instances[key] or {}
+    return ModernMapMarkersDB.instances[key]
+end
+
+-- normalised dungeon base names known from the marker data ("Dire Maul - East" -> "diremaul")
+function MMM:DungeonBases()
+    if self.dungeonBases then return self.dungeonBases end
+    self:BuildData()
+    local t, any = {}, false
+    for _, d in pairs(self.Data or {}) do
+        if d.type == "DUNGEON" then
+            local b = BaseName(d.name)
+            t[NormName(b)] = b
+            t[NormName(L:GetLocalizedMarkerName(b))] = b
+            any = true
+        end
+    end
+    if any then self.dungeonBases = t end
+    return t
+end
+
+-- which known dungeon does this zone/instance text name? (exact, then the longest known name it starts with)
+function MMM:MatchDungeon(text)
+    if not text or text == "" then return nil end
+    local n = NormName(text)
+    local bases = self:DungeonBases()
+    if bases[n] then return bases[n] end
+    local best, bestLen = nil, 0
+    for key, b in pairs(bases) do
+        local len = string.len(key)
+        if len >= 5 and len > bestLen and string.sub(n, 1, len) == key then best, bestLen = b, len end
+    end
+    return best
+end
+
+local function ForgetExpired(store)
+    local changed = false
+    local now = time()
+    for key, rec in pairs(store) do
+        if rec.left and (now - rec.left) >= DUNGEON_IDLE_RESET then store[key] = nil; changed = true end
+    end
+    return changed
+end
+
+-- known dungeons whose name merely CONTAINS this text (an instance shared by several markers,
+-- e.g. "Blackrock Spire" for the Lower and Upper halves)
+function MMM:DungeonCandidates(text)
+    local out = {}
+    local n = NormName(text)
+    if string.len(n) < 8 then return out end
+    local seen = {}
+    for key, b in pairs(self:DungeonBases()) do
+        if string.find(key, n, 1, true) and not seen[b] then
+            seen[b] = true
+            table.insert(out, b)
+        end
+    end
+    return out
+end
+
+-- zone/instance text (+ sub-zone as tiebreaker) -> the dungeon it names, or nil
+function MMM:ResolveDungeon(text, sub)
+    local base = self:MatchDungeon(text)
+    local subBase = (sub and sub ~= "") and self:MatchDungeon(sub) or nil
+    if base then
+        -- the sub-zone names the exact wing when it extends the zone name
+        if subBase and string.find(NormName(subBase), NormName(base), 1, true) then base = subBase end
+        return base
+    end
+    local cands = self:DungeonCandidates(text)
+    if table.getn(cands) == 1 then return cands[1] end
+    if table.getn(cands) > 1 and subBase then
+        for i = 1, table.getn(cands) do
+            if cands[i] == subBase then return subBase end
+        end
+    end
+    return nil
+end
+
+-- drop remembered dungeons that have been empty for the idle period; true when something was dropped
+function MMM:PruneDungeons()
+    if not self:DungeonTrackingEnabled() then return false end
+    local store = self:DungeonStore()
+    return (store and ForgetExpired(store)) and true or false
+end
+
+-- is the character inside a dungeon right now? (called after zoning)
+function MMM:CheckInstanceZone()
+    if not self:DungeonTrackingEnabled() then return end
+    local store = self:DungeonStore()
+    if not store then return end
+    local base = nil
+    local sub = (type(GetSubZoneText) == "function") and GetSubZoneText() or nil
+    local certain = false
+    if type(GetInstanceInfo) == "function" then
+        -- ClassicAPI: "party" = 5-man dungeon, "none" = open world (so a sub-zone named like the dungeon is not enough)
+        local name, itype = GetInstanceInfo()
+        if itype == "party" then
+            base = self:ResolveDungeon(name, sub); certain = true
+        elseif itype == "none" or itype == "raid" or itype == "pvp" then
+            certain = true
+        end
+    end
+    if (not certain) and type(GetRealZoneText) == "function" then
+        -- stock client: inside an instance GetRealZoneText() is the instance name, outside it is the world zone
+        base = self:ResolveDungeon(GetRealZoneText(), sub)
+    end
+    local changed = false
+    local prev = self.currentDungeon
+    if base then
+        local key = NormName(base)
+        local rec = store[key]
+        if not rec then
+            store[key] = { name = base, entered = time() }
+            changed = true
+        elseif rec.left then
+            rec.left = nil
+            changed = true
+        end
+        if prev and prev ~= key and store[prev] and not store[prev].left then
+            store[prev].left = time()   -- moved straight from one dungeon to another
+            changed = true
+        end
+        self.currentDungeon = key
+    else
+        if prev and store[prev] and not store[prev].left then
+            store[prev].left = time()
+            changed = true
+        end
+        self.currentDungeon = nil
+    end
+    if ForgetExpired(store) then changed = true end
+    if changed then self:InvalidateCache(); self:RefreshMarkers() end
+end
+
+-- the record for an active dungeon (nil when not active)
+function MMM:GetActiveDungeon(nameEN)
+    if not self:DungeonTrackingEnabled() then return nil end
+    local store = self:DungeonStore()
+    if not store then return nil end
+    local rec = store[NormName(BaseName(nameEN))]
+    if not rec then return nil end
+    if rec.left and (time() - rec.left) >= DUNGEON_IDLE_RESET then return nil end
+    return rec
+end
+
+function MMM:ForgetDungeon(key)
+    local store = self:DungeonStore()
+    if store and store[key] and key ~= self.currentDungeon then
+        store[key] = nil
+        return true
+    end
+    return false
+end
+
+-- "<name> has been reset." / "Cannot reset <name>. ..." from the game
+function MMM:OnResetMessage(msg)
+    if not msg then return end
+    local _, _, okName = string.find(msg, RESET_OK_PATTERN)
+    if okName then
+        self.resetSuccesses = (self.resetSuccesses or 0) + 1
+        local base = self:MatchDungeon(okName)
+        if base and self:ForgetDungeon(NormName(base)) then
+            self:InvalidateCache(); self:RefreshMarkers()
+        end
+        return
+    end
+    if RESET_FAIL_PREFIX ~= "" and string.sub(msg, 1, string.len(RESET_FAIL_PREFIX)) == RESET_FAIL_PREFIX then
+        local rest = string.sub(msg, string.len(RESET_FAIL_PREFIX) + 1)
+        local base = self:MatchDungeon(rest)
+        if base then
+            self.resetFailed = self.resetFailed or {}
+            self.resetFailed[NormName(base)] = true
+        end
+    end
+end
+
+-- ResetInstances() was called: collect the replies for a moment, then clear every dungeon the game did
+-- not refuse to reset (its names do not always match the map names, so the count of replies is what counts)
+function MMM:OnResetInstances()
+    self.resetSuccesses = 0
+    self.resetFailed = {}
+    if not self.resetFrame then self.resetFrame = CreateFrame("Frame") end
+    local deadline = GetTime() + RESET_WINDOW
+    self.resetFrame:SetScript("OnUpdate", function()
+        if GetTime() < deadline then return end
+        this:SetScript("OnUpdate", nil)
+        local store = MMM:DungeonStore()
+        local changed = false
+        if store and (MMM.resetSuccesses or 0) > 0 then
+            for key in pairs(store) do
+                if key ~= MMM.currentDungeon and not (MMM.resetFailed and MMM.resetFailed[key]) then
+                    store[key] = nil
+                    changed = true
+                end
+            end
+        end
+        if changed then MMM:InvalidateCache(); MMM:RefreshMarkers() end
+    end)
+end
+
+function MMM:HookResetInstances()
+    if self.resetHooked or type(ResetInstances) ~= "function" then return end
+    self.resetHooked = true
+    local original = ResetInstances
+    ResetInstances = function()
+        MMM:OnResetInstances()
+        return original()
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -777,6 +1026,7 @@ function MMM:RefreshMarkersInner()
 
                 -- Dim dungeons/raids this character is already saved to
                 local locked = (data.type == "DUNGEON" or data.type == "RAID") and MMM:GetLockout(data.name)
+                if (not locked) and data.type == "DUNGEON" and MMM:GetActiveDungeon(data.name) then locked = true end
                 MMM:ApplyLockoutVisual(marker.texture, locked)
 
                 -- "Find Marker" pulse
@@ -881,6 +1131,10 @@ function MMM:ShowMarkerTooltip(m)
         if remain then
             WorldMapTooltip:AddLine(T("Saved") .. ": " .. FormatDuration(remain), 1, 0.4, 0.4)
         end
+    end
+
+    if m.markerType == "DUNGEON" and MMM:GetActiveDungeon(m.nameEN) then
+        WorldMapTooltip:AddLine(T("Active instance"), 1, 0.4, 0.4)
     end
 
     -- Live distance (needs ClassicAPI C_Map; silently skipped otherwise)
@@ -1078,7 +1332,7 @@ MMM:SetScript("OnEvent", function()
                             end
                             pin.icon:SetTexture(mmmTex)
                             pin.mmmInstance = instance
-                            MMM:ApplyLockoutVisual(pin.icon, MMM:GetLockout(instance.Name or ""))
+                            MMM:ApplyLockoutVisual(pin.icon, MMM:GetLockout(instance.Name or "") or (instance.Type ~= IJLib.InstanceType.Raid and MMM:GetActiveDungeon(instance.Name or "")))
 
                             if not pin.mmmReskinned then
                                 pin.mmmReskinned = true
@@ -1108,6 +1362,8 @@ MMM:SetScript("OnEvent", function()
                                         local ijLock = MMM:GetLockout(inst.Name or "")
                                         if ijLock then
                                             WorldMapTooltip:AddLine(T("Saved") .. ": " .. FormatDuration(ijLock), 1, 0.4, 0.4)
+                                        elseif inst.Type ~= IJLib.InstanceType.Raid and MMM:GetActiveDungeon(inst.Name or "") then
+                                            WorldMapTooltip:AddLine(T("Active instance"), 1, 0.4, 0.4)
                                         end
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Left-Click: View Map"), 0.5, 0.5, 0.5)
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
@@ -1159,14 +1415,18 @@ MMM:SetScript("OnEvent", function()
     elseif event == "PLAYER_ENTERING_WORLD" then
         MMM:RequestLockouts(true)
         MMM:ScheduleLockoutRequests()
+        MMM:HookResetInstances()
+        MMM:CheckInstanceZone()
 
     elseif event == "UPDATE_INSTANCE_INFO" then
         MMM:UpdateLockouts(true)
 
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "RAID_INSTANCE_WELCOME" then
         MMM:RequestLockouts(event == "RAID_INSTANCE_WELCOME")
+        MMM:CheckInstanceZone()
 
     elseif event == "CHAT_MSG_SYSTEM" then
+        MMM:OnResetMessage(arg1)
         -- "You are now saved to this instance" / an instance was reset: ask again soon
         if arg1 and string.find(string.lower(arg1), "saved", 1, true) or (arg1 and string.find(string.lower(arg1), "reset", 1, true)) then
             MMM:ScheduleLockoutRequests()
@@ -1193,14 +1453,34 @@ MMM:RegisterEvent("CHAT_MSG_SYSTEM")
 -- Only exists with ClassicAPI; registering an unknown event is harmless in 1.12
 MMM:RegisterEvent("USER_WAYPOINT_UPDATED")
 
--- /mmmlock : show what the game reports as saved, and which map icons it matched
+-- /mmmlock            : saved raids reported by the game, tracked dungeons, and which map icons are greyed
+-- /mmmlock dungeons on|off : switch dungeon tracking
+-- /mmmlock clear           : forget every tracked dungeon (if the addon ever gets it wrong)
 SLASH_MMMLOCK1 = "/mmmlock"
-SlashCmdList["MMMLOCK"] = function()
+SlashCmdList["MMMLOCK"] = function(msg)
+    msg = string.lower(msg or "")
+    local _, _, cmd, option = string.find(msg, "^%s*(%S*)%s*(%S*)")
+    if cmd == "dungeons" then
+        if ModernMapMarkersDB == nil then ModernMapMarkersDB = {} end
+        if option == "off" then ModernMapMarkersDB.trackDungeons = false
+        elseif option == "on" then ModernMapMarkersDB.trackDungeons = nil
+        else Msg("usage: /mmmlock dungeons on | off   (now " .. (MMM:DungeonTrackingEnabled() and "on" or "off") .. ")") return end
+        Msg("dungeon tracking is " .. (MMM:DungeonTrackingEnabled() and "on" or "off") .. ".")
+        MMM:InvalidateCache(); MMM:RefreshMarkers()
+        return
+    elseif cmd == "clear" then
+        local store = MMM:DungeonStore()
+        if store then for key in pairs(store) do store[key] = nil end end
+        MMM.currentDungeon = nil
+        Msg("forgot all tracked dungeon instances.")
+        MMM:InvalidateCache(); MMM:RefreshMarkers()
+        return
+    end
     MMM:RequestLockouts(true)
     MMM:UpdateLockouts(true)
     local n = 0
     if type(GetNumSavedInstances) == "function" then n = GetNumSavedInstances() or 0 end
-    Msg("saved instances reported by the game: " .. n)
+    Msg("saved raids reported by the game: " .. n)
     for i = 1, n do
         local name, id, reset = GetSavedInstanceInfo(i)
         if name then
@@ -1208,16 +1488,26 @@ SlashCmdList["MMMLOCK"] = function()
             DEFAULT_CHAT_FRAME:AddMessage("   " .. name .. "  (resets in " .. FormatDuration(left) .. ")")
         end
     end
+    local store = MMM:DungeonStore()
+    local count = 0
+    if store then
+        for key, rec in pairs(store) do
+            count = count + 1
+            local where = (key == MMM.currentDungeon) and "inside now" or ("left " .. FormatDuration(time() - (rec.left or time())) .. " ago")
+            DEFAULT_CHAT_FRAME:AddMessage("   active dungeon instance: " .. (rec.name or key) .. "  (" .. where .. ")")
+        end
+    end
+    Msg("tracked dungeon instances: " .. count .. " (dungeon tracking " .. (MMM:DungeonTrackingEnabled() and "on" or "off") .. "; cleared by Reset Instances)")
     local matched = 0
     for _, d in pairs(MMM.Data or {}) do
-        if (d.type == "DUNGEON" or d.type == "RAID") and MMM:GetLockout(d.name) then
+        if (d.type == "DUNGEON" or d.type == "RAID") and (MMM:GetLockout(d.name) or (d.type == "DUNGEON" and MMM:GetActiveDungeon(d.name))) then
             matched = matched + 1
             DEFAULT_CHAT_FRAME:AddMessage("   map icon greyed: " .. d.name)
         end
     end
-    if n == 0 then
-        Msg("nothing saved yet. If you ARE saved somewhere, the game has not sent the raid info; open the Raid Info panel once and run /mmmlock again.")
-    elseif matched == 0 then
-        Msg("saved instances found but none matches a map icon name; please report the names listed above.")
+    if n == 0 and count == 0 then
+        Msg("nothing saved or active. If you ARE saved to a raid, the game has not sent the raid info; open the Raid Info panel once and run /mmmlock again.")
+    elseif n > 0 and matched == 0 then
+        Msg("saved raids found but none matches a map icon name; please report the names listed above.")
     end
 end

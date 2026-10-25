@@ -1,3 +1,24 @@
+# ModernMapMarkers 2.7 – changes
+
+## Added: dungeon instances are tracked and greyed until reset
+Raid Info only lists raids, so five-man dungeons never got a greyed icon. They are now tracked from what the client does expose:
+
+- **Entering** a dungeon marks it active (zone name; with ClassicAPI also the instance type, so a sub-zone merely named like a dungeon is not mistaken for being inside). Its icon is greyed and its tooltip says "Active instance" (InstanceJournal pins too). It stays active after you leave.
+- **Reset** clears it: the game's "<name> has been reset." message clears that dungeon (so "DireMaul has been reset." clears Dire Maul), and a manual `ResetInstances()` clears every dungeon the game did not refuse ("Cannot reset <name>. There are players still inside the instance."). If the game's names do not match the map names, any "has been reset" reply during the reset still counts. An instance you are standing in is never cleared. With no reply from the game (for example you are not the party leader) nothing is assumed reset. Saved raids are unaffected by a reset.
+- **Persistence and expiry:** remembered per character in the saved variables; an instance left for an hour is considered reset (assumption).
+- `/mmmlock` now also lists tracked dungeons; `/mmmlock dungeons on|off` and `/mmmlock clear`.
+- New translated string "Active instance" (de, es, pt, zh).
+
+## Fixed
+- A dungeon's grey did not clear when its idle hour passed while the map stayed open; the periodic and per-update checks now cover dungeon expiry too.
+- The saved-variables table is created on demand (it normally only exists after the first logout).
+
+## Verification
+- 37 scenarios pass (2.6 passes the 17 earlier ones; the 20 new dungeon scenarios need 2.7).
+- 300 random dungeon sessions (92,285 icon checks, with and without ClassicAPI instance info) against an independent model: 0 mismatches.
+- The raid-lockout fuzz from 2.6 still shows 0 violations over 82,997 checks.
+- With nothing active, all 369 map views are identical to 2.5 and 2.6.
+
 # ModernMapMarkers 2.6 – changes
 
 ## Fixed: saved-instance lockouts did not show (greyed icon, reset time)
