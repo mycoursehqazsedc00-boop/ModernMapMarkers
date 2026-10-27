@@ -165,6 +165,8 @@ ModernMapMarkers_Locale:RegisterMarkers("esES", {
     ["Right-Click: Clear Waypoint"] = "Clic derecho: Quitar punto de ruta",
     ["Ctrl+Click: Set Waypoint"] = "Ctrl+Clic: Fijar punto de ruta",
     ["Saved"] = "Guardado",
+    ["Active instance"] = "Instancia activa",
+    ["Instance limit"] = "Límite de instancias",
 
     -- Chat messages
     ["Dropdown menus hidden."] = "Menús desplegables ocultos.",

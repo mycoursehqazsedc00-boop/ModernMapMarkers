@@ -165,6 +165,8 @@ ModernMapMarkers_Locale:RegisterMarkers("ptBR", {
     ["Right-Click: Clear Waypoint"] = "Clique direito: Remover ponto de rota",
     ["Ctrl+Click: Set Waypoint"] = "Ctrl+Clique: Definir ponto de rota",
     ["Saved"] = "Salvo",
+    ["Active instance"] = "Instância ativa",
+    ["Instance limit"] = "Limite de instâncias",
 
     -- Chat messages
     ["Dropdown menus hidden."] = "Menus suspensos ocultados.",

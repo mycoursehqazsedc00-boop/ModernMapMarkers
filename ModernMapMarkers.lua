@@ -563,14 +563,22 @@ local DUNGEON_IDLE_RESET = 3600  -- ASSUMPTION: an instance nobody is inside res
 local RESET_WINDOW = 3           -- seconds after ResetInstances() in which the game's replies are collected
 
 local function FormatToPattern(fmt)
+    fmt = string.gsub(fmt, "%.%s*$", "")        -- the closing full stop is optional (see the pattern's end)
     fmt = string.gsub(fmt, "%%s", "\1")
     fmt = string.gsub(fmt, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
     fmt = string.gsub(fmt, "\1", "(.+)")
-    return "^" .. fmt .. "$"
+    return "^" .. fmt .. "%.?%s*$"
 end
 local RESET_OK_PATTERN   = FormatToPattern(INSTANCE_RESET_SUCCESS or "%s has been reset.")
 -- the failure text continues after the name ("... There are players still inside the instance.")
 local RESET_FAIL_PREFIX  = string.gsub(INSTANCE_RESET_FAILED or "Cannot reset %s.", "%%s.*$", "")
+
+local INSTANCE_LIMIT_DEFAULT = 5   -- ASSUMPTION: new instances a character may enter per hour
+local LIMIT_WINDOW = 3600
+
+local function CharKey()
+    return (UnitName("player") or "?") .. "-" .. ((GetRealmName and GetRealmName()) or "?")
+end
 
 function MMM:DungeonTrackingEnabled()
     return not (ModernMapMarkersDB and ModernMapMarkersDB.trackDungeons == false)
@@ -580,9 +588,65 @@ function MMM:DungeonStore()
     -- on a first run the saved-variables table does not exist yet (it is normally created at logout)
     if not ModernMapMarkersDB then ModernMapMarkersDB = {} end
     ModernMapMarkersDB.instances = ModernMapMarkersDB.instances or {}
-    local key = (UnitName("player") or "?") .. "-" .. ((GetRealmName and GetRealmName()) or "?")
+    local key = CharKey()
     ModernMapMarkersDB.instances[key] = ModernMapMarkersDB.instances[key] or {}
     return ModernMapMarkersDB.instances[key]
+end
+
+-- when this character entered NEW instances (re-entering the same instance is free), and when the game last
+-- said "You have entered too many instances recently."
+function MMM:InstanceLog()
+    if not ModernMapMarkersDB then ModernMapMarkersDB = {} end
+    ModernMapMarkersDB.instanceLog = ModernMapMarkersDB.instanceLog or {}
+    local key = CharKey()
+    local log = ModernMapMarkersDB.instanceLog[key]
+    if not log then
+        log = { entries = {} }
+        ModernMapMarkersDB.instanceLog[key] = log
+    end
+    local now = time()
+    local kept = {}
+    for i = 1, table.getn(log.entries) do
+        if (now - log.entries[i]) < LIMIT_WINDOW then table.insert(kept, log.entries[i]) end
+    end
+    log.entries = kept
+    if log.limitAt and (now - log.limitAt) >= LIMIT_WINDOW then log.limitAt = nil end
+    return log
+end
+
+function MMM:InstanceLimit()
+    return (ModernMapMarkersDB and ModernMapMarkersDB.instanceLimit) or INSTANCE_LIMIT_DEFAULT
+end
+
+-- seconds until another NEW instance may be entered, or nil when nothing blocks it.
+-- Second value is true when it is only an upper bound (the game said so but we did not see the entries).
+function MMM:InstanceLimitRemaining()
+    if not self:DungeonTrackingEnabled() then return nil end
+    local log = self:InstanceLog()
+    local now = time()
+    local limit = self:InstanceLimit()
+    local n = table.getn(log.entries)
+    if n >= limit then
+        local fromLog = log.entries[n - limit + 1] + LIMIT_WINDOW - now
+        if fromLog > 0 then return fromLog, false end
+    end
+    if log.limitAt then
+        local fromMsg = log.limitAt + LIMIT_WINDOW - now
+        if fromMsg > 0 then return fromMsg, true end
+    end
+    return nil
+end
+
+function MMM:OnLimitMessage()
+    self:InstanceLog().limitAt = time()
+end
+
+-- the last few zone checks, for /mmmlock: what the client reported and what was recognised
+function MMM:LogZoneCheck(zone, sub, itype, iname, base)
+    self.zoneChecks = self.zoneChecks or {}
+    table.insert(self.zoneChecks, date("%H:%M:%S") .. "  zone='" .. tostring(zone) .. "' sub='" .. tostring(sub)
+        .. "' instance=" .. tostring(itype) .. "/'" .. tostring(iname) .. "'  ->  " .. (base or "no known dungeon"))
+    while table.getn(self.zoneChecks) > 6 do table.remove(self.zoneChecks, 1) end
 end
 
 -- normalised dungeon base names known from the marker data ("Dire Maul - East" -> "diremaul")
@@ -673,28 +737,43 @@ function MMM:CheckInstanceZone()
     local store = self:DungeonStore()
     if not store then return end
     local base = nil
+    local zoneText = (type(GetRealZoneText) == "function") and GetRealZoneText() or nil
     local sub = (type(GetSubZoneText) == "function") and GetSubZoneText() or nil
     local certain = false
+    local itype, iname
     if type(GetInstanceInfo) == "function" then
         -- ClassicAPI: "party" = 5-man dungeon, "none" = open world (so a sub-zone named like the dungeon is not enough)
-        local name, itype = GetInstanceInfo()
+        iname, itype = GetInstanceInfo()
         if itype == "party" then
-            base = self:ResolveDungeon(name, sub); certain = true
+            base = self:ResolveDungeon(iname, sub); certain = true
+            if not base then base = self:ResolveDungeon(zoneText, sub) end
         elseif itype == "none" or itype == "raid" or itype == "pvp" then
             certain = true
         end
     end
-    if (not certain) and type(GetRealZoneText) == "function" then
+    if (not certain) and zoneText then
         -- stock client: inside an instance GetRealZoneText() is the instance name, outside it is the world zone
-        base = self:ResolveDungeon(GetRealZoneText(), sub)
+        base = self:ResolveDungeon(zoneText, sub)
     end
-    local changed = false
+    self:LogZoneCheck(zoneText, sub, itype, iname, base)
+    local changed = ForgetExpired(store)   -- an instance left over an hour ago is gone: entering it again is a NEW instance
+    if itype == "party" and not base then
+        self.unknownReported = self.unknownReported or {}
+        local shown = iname or zoneText or "?"
+        if not self.unknownReported[shown] then
+            self.unknownReported[shown] = true
+            Msg("you are in a dungeon the map does not know ('" .. tostring(shown) .. "'); type /mmmlock to see the details.")
+        end
+    end
     local prev = self.currentDungeon
     if base then
         local key = NormName(base)
         local rec = store[key]
         if not rec then
             store[key] = { name = base, entered = time() }
+            local log = self:InstanceLog()
+            table.insert(log.entries, time())   -- a new instance counts towards the hourly limit
+            log.limitAt = nil                   -- and it obviously was allowed
             changed = true
         elseif rec.left then
             rec.left = nil
@@ -712,7 +791,6 @@ function MMM:CheckInstanceZone()
         end
         self.currentDungeon = nil
     end
-    if ForgetExpired(store) then changed = true end
     if changed then self:InvalidateCache(); self:RefreshMarkers() end
 end
 
@@ -739,6 +817,10 @@ end
 -- "<name> has been reset." / "Cannot reset <name>. ..." from the game
 function MMM:OnResetMessage(msg)
     if not msg then return end
+    if string.find(string.lower(msg), "too many instances", 1, true) then
+        self:OnLimitMessage()
+        return
+    end
     local _, _, okName = string.find(msg, RESET_OK_PATTERN)
     if okName then
         self.resetSuccesses = (self.resetSuccesses or 0) + 1
@@ -1133,8 +1215,15 @@ function MMM:ShowMarkerTooltip(m)
         end
     end
 
-    if m.markerType == "DUNGEON" and MMM:GetActiveDungeon(m.nameEN) then
-        WorldMapTooltip:AddLine(T("Active instance"), 1, 0.4, 0.4)
+    if m.markerType == "DUNGEON" then
+        if MMM:GetActiveDungeon(m.nameEN) then
+            WorldMapTooltip:AddLine(T("Active instance"), 1, 0.4, 0.4)
+        else
+            local limitLeft, upper = MMM:InstanceLimitRemaining()
+            if limitLeft then
+                WorldMapTooltip:AddLine(T("Instance limit") .. ": " .. (upper and "<= " or "~") .. FormatDuration(limitLeft), 1, 0.6, 0.2)
+            end
+        end
     end
 
     -- Live distance (needs ClassicAPI C_Map; silently skipped otherwise)
@@ -1364,6 +1453,11 @@ MMM:SetScript("OnEvent", function()
                                             WorldMapTooltip:AddLine(T("Saved") .. ": " .. FormatDuration(ijLock), 1, 0.4, 0.4)
                                         elseif inst.Type ~= IJLib.InstanceType.Raid and MMM:GetActiveDungeon(inst.Name or "") then
                                             WorldMapTooltip:AddLine(T("Active instance"), 1, 0.4, 0.4)
+                                        elseif inst.Type ~= IJLib.InstanceType.Raid then
+                                            local limitLeft, upper = MMM:InstanceLimitRemaining()
+                                            if limitLeft then
+                                                WorldMapTooltip:AddLine(T("Instance limit") .. ": " .. (upper and "<= " or "~") .. FormatDuration(limitLeft), 1, 0.6, 0.2)
+                                            end
                                         end
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Left-Click: View Map"), 0.5, 0.5, 0.5)
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
@@ -1468,9 +1562,22 @@ SlashCmdList["MMMLOCK"] = function(msg)
         Msg("dungeon tracking is " .. (MMM:DungeonTrackingEnabled() and "on" or "off") .. ".")
         MMM:InvalidateCache(); MMM:RefreshMarkers()
         return
+    elseif cmd == "limit" then
+        local n = tonumber(option)
+        if not n or n < 1 or n > 50 then
+            Msg("usage: /mmmlock limit <1-50>   (new instances per hour; now " .. MMM:InstanceLimit() .. ")")
+            return
+        end
+        if ModernMapMarkersDB == nil then ModernMapMarkersDB = {} end
+        ModernMapMarkersDB.instanceLimit = n
+        Msg("instance limit set to " .. n .. " per hour.")
+        return
     elseif cmd == "clear" then
         local store = MMM:DungeonStore()
         if store then for key in pairs(store) do store[key] = nil end end
+        local log = MMM:InstanceLog()
+        log.entries = {}
+        log.limitAt = nil
         MMM.currentDungeon = nil
         Msg("forgot all tracked dungeon instances.")
         MMM:InvalidateCache(); MMM:RefreshMarkers()
@@ -1498,6 +1605,16 @@ SlashCmdList["MMMLOCK"] = function(msg)
         end
     end
     Msg("tracked dungeon instances: " .. count .. " (dungeon tracking " .. (MMM:DungeonTrackingEnabled() and "on" or "off") .. "; cleared by Reset Instances)")
+    local log = MMM:InstanceLog()
+    Msg("new instances entered in the last hour: " .. table.getn(log.entries) .. " (limit " .. MMM:InstanceLimit() .. ")")
+    local limitLeft, upper = MMM:InstanceLimitRemaining()
+    if limitLeft then
+        DEFAULT_CHAT_FRAME:AddMessage("   instance limit reached: next new instance in " .. (upper and "at most " or "about ") .. FormatDuration(limitLeft))
+    end
+    if MMM.zoneChecks and table.getn(MMM.zoneChecks) > 0 then
+        Msg("last zone checks (what the game reported):")
+        for i = 1, table.getn(MMM.zoneChecks) do DEFAULT_CHAT_FRAME:AddMessage("   " .. MMM.zoneChecks[i]) end
+    end
     local matched = 0
     for _, d in pairs(MMM.Data or {}) do
         if (d.type == "DUNGEON" or d.type == "RAID") and (MMM:GetLockout(d.name) or (d.type == "DUNGEON" and MMM:GetActiveDungeon(d.name))) then

@@ -167,6 +167,8 @@ ModernMapMarkers_Locale:RegisterMarkers("deDE", {
     ["Right-Click: Clear Waypoint"] = "Rechtsklick: Wegpunkt löschen",
     ["Ctrl+Click: Set Waypoint"] = "Strg+Klick: Wegpunkt setzen",
     ["Saved"] = "Gespeichert",
+    ["Active instance"] = "Aktive Instanz",
+    ["Instance limit"] = "Instanzlimit",
 
     -- Chat messages
     ["Dropdown menus hidden."] = "Dropdown-Menüs ausgeblendet.",

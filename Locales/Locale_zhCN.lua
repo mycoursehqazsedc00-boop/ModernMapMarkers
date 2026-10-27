@@ -165,6 +165,8 @@ ModernMapMarkers_Locale:RegisterMarkers("zhCN", {
     ["Right-Click: Clear Waypoint"] = "右键点击：清除路径点",
     ["Ctrl+Click: Set Waypoint"] = "Ctrl+点击：设置路径点",
     ["Saved"] = "已锁定",
+    ["Active instance"] = "副本已激活",
+    ["Instance limit"] = "副本次数限制",
 
     -- Chat messages
     ["Dropdown menus hidden."] = "下拉菜单已隐藏。",

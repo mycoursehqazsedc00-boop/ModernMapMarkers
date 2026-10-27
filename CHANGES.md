@@ -1,3 +1,20 @@
+# ModernMapMarkers 2.8 – changes
+
+## Fixed
+- **The reset message was only recognised with a full stop.** "DireMaul has been reset." worked, but "Stormwrought Ruins has been reset" (no full stop) was ignored, so a reset never cleared the dungeon. The closing full stop and trailing spaces are now optional.
+- An instance left more than an hour ago now counts as a **new** instance when you enter it again (the expired record was only dropped after the entry was handled).
+
+## Added
+- **Hourly instance limit.** The game's "You have entered too many instances recently." message is recognised. Dungeons you have no instance for show "Instance limit: <= Xm" (an upper bound: an hour from the message) in their tooltip, and InstanceJournal pins do too. The addon also counts the new instances you enter (kept per character across relogs) and, once the limit is reached, shows the exact time until the oldest entry ages out. A successful new entry clears the message-based state. The icon is not greyed. `/mmmlock limit <1-50>` sets the number (default 5, an assumption about the server).
+- **Diagnostics.** `/mmmlock` now prints the last six zone checks (the zone, sub-zone and instance type/name the game reported, and which dungeon it matched) and the entry count. When ClassicAPI says you are in a dungeon the map does not know, the addon tells you once, naming it.
+- New translated string "Instance limit" (de, es, pt, zh).
+
+## Verification
+- 47 scenarios pass (2.7 passes 38 of them).
+- 300 random dungeon sessions (110,109 checks, with and without ClassicAPI instance info) against an independent model, now covering reset messages with and without a full stop, limit messages and the entry counter: 0 mismatches. On 2.7 the same sessions disagree.
+- The raid-lockout fuzz still shows 0 violations over 82,997 checks.
+- With nothing saved or active, all 369 map views are identical to 2.5, 2.6 and 2.7.
+
 # ModernMapMarkers 2.7 – changes
 
 ## Added: dungeon instances are tracked and greyed until reset
