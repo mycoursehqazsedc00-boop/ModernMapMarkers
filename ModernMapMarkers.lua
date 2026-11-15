@@ -639,6 +639,7 @@ end
 
 function MMM:OnLimitMessage()
     self:InstanceLog().limitAt = time()
+    if self.UpdateResetTrackerFrame then self:UpdateResetTrackerFrame() end
 end
 
 -- the last few zone checks, for /mmmlock: what the client reported and what was recognised
@@ -791,7 +792,11 @@ function MMM:CheckInstanceZone()
         end
         self.currentDungeon = nil
     end
-    if changed then self:InvalidateCache(); self:RefreshMarkers() end
+    if changed then
+        self:InvalidateCache()
+        self:RefreshMarkers()
+        if self.UpdateResetTrackerFrame then self:UpdateResetTrackerFrame() end
+    end
 end
 
 -- the record for an active dungeon (nil when not active)
@@ -852,15 +857,21 @@ function MMM:OnResetInstances()
         this:SetScript("OnUpdate", nil)
         local store = MMM:DungeonStore()
         local changed = false
+        local clearedCount = 0
         if store and (MMM.resetSuccesses or 0) > 0 then
             for key in pairs(store) do
                 if key ~= MMM.currentDungeon and not (MMM.resetFailed and MMM.resetFailed[key]) then
                     store[key] = nil
                     changed = true
+                    clearedCount = clearedCount + 1
                 end
             end
         end
+        if (MMM.resetSuccesses or 0) > clearedCount and MMM.OnExtraInstanceResets then
+            MMM:OnExtraInstanceResets(MMM.resetSuccesses - clearedCount)
+        end
         if changed then MMM:InvalidateCache(); MMM:RefreshMarkers() end
+        if MMM.UpdateResetTrackerFrame then MMM:UpdateResetTrackerFrame() end
     end)
 end
 
@@ -1224,6 +1235,9 @@ function MMM:ShowMarkerTooltip(m)
                 WorldMapTooltip:AddLine(T("Instance limit") .. ": " .. (upper and "<= " or "~") .. FormatDuration(limitLeft), 1, 0.6, 0.2)
             end
         end
+        if MMM.AddResetTooltipLines then
+            MMM:AddResetTooltipLines(WorldMapTooltip)
+        end
     end
 
     -- Live distance (needs ClassicAPI C_Map; silently skipped otherwise)
@@ -1458,6 +1472,9 @@ MMM:SetScript("OnEvent", function()
                                             if limitLeft then
                                                 WorldMapTooltip:AddLine(T("Instance limit") .. ": " .. (upper and "<= " or "~") .. FormatDuration(limitLeft), 1, 0.6, 0.2)
                                             end
+                                        end
+                                        if inst.Type ~= IJLib.InstanceType.Raid and MMM.AddResetTooltipLines then
+                                            MMM:AddResetTooltipLines(WorldMapTooltip)
                                         end
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Left-Click: View Map"), 0.5, 0.5, 0.5)
                                         WorldMapTooltip:AddLine(L:GetLocalizedMarkerName("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
