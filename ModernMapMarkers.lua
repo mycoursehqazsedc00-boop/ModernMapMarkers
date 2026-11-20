@@ -830,8 +830,19 @@ function MMM:OnResetMessage(msg)
     if okName then
         self.resetSuccesses = (self.resetSuccesses or 0) + 1
         local base = self:MatchDungeon(okName)
-        if base and self:ForgetDungeon(NormName(base)) then
+        local forgot = base and self:ForgetDungeon(NormName(base))
+        if forgot then
             self:InvalidateCache(); self:RefreshMarkers()
+        end
+        if not self.manualResetActive then
+            if self.ResetTrace then
+                self:ResetTrace("Auto/leader reset: " .. tostring(okName) .. " (trackedDungeon=" .. tostring(forgot and true or false) .. ")")
+            end
+            if not forgot and self.OnExtraInstanceResets then
+                self:OnExtraInstanceResets(1)
+            elseif self.UpdateResetTrackerFrame then
+                self:UpdateResetTrackerFrame()
+            end
         end
         return
     end
@@ -848,6 +859,7 @@ end
 -- ResetInstances() was called: collect the replies for a moment, then clear every dungeon the game did
 -- not refuse to reset (its names do not always match the map names, so the count of replies is what counts)
 function MMM:OnResetInstances()
+    self.manualResetActive = true
     self.resetSuccesses = 0
     self.resetFailed = {}
     if not self.resetFrame then self.resetFrame = CreateFrame("Frame") end
@@ -855,6 +867,7 @@ function MMM:OnResetInstances()
     self.resetFrame:SetScript("OnUpdate", function()
         if GetTime() < deadline then return end
         this:SetScript("OnUpdate", nil)
+        MMM.manualResetActive = nil
         local store = MMM:DungeonStore()
         local changed = false
         local clearedCount = 0
