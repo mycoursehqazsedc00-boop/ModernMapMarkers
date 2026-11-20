@@ -85,6 +85,16 @@ end
 function MMM:OnExtraInstanceResets(count)
     if not self:DungeonTrackingEnabled() then return end
     if not count or count <= 0 then return end
+    local db = EnsureResetTrackerDB()
+    if db.activeUnsavedRaid then
+        db.activeUnsavedRaid = nil
+        count = count - 1
+        self:ResetTrace("Cleared activeUnsavedRaid on explicit reset; remaining extra=" .. count)
+        if count <= 0 then
+            self:UpdateResetTrackerFrame()
+            return
+        end
+    end
     local log = self:InstanceLog()
     local limit = self:InstanceLimit()
     local now = time()
@@ -262,14 +272,111 @@ function MMM:CreateResetTrackerFrame()
     return f
 end
 
--- Initialize on VARIABLES_LOADED / PLAYER_ENTERING_WORLD
+local function NormRaidName(s)
+    return string.gsub(string.lower(s or ""), "[^%a%d]", "")
+end
+
+local function IsInGroup()
+    if type(GetNumRaidMembers) == "function" and GetNumRaidMembers() > 0 then return true end
+    if type(GetNumPartyMembers) == "function" and GetNumPartyMembers() > 0 then return true end
+    return false
+end
+
+local function IsRaidSaved(raidName)
+    if not raidName or raidName == "" then return false end
+    if MMM.GetLockout and MMM:GetLockout(raidName) then return true end
+    if type(GetNumSavedInstances) == "function" and type(GetSavedInstanceInfo) == "function" then
+        local target = NormRaidName(raidName)
+        local n = GetNumSavedInstances() or 0
+        for i = 1, n do
+            local name = GetSavedInstanceInfo(i)
+            if name and NormRaidName(name) == target then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function MMM:CheckRaidEntry(ev, arg)
+    if not self:DungeonTrackingEnabled() then return end
+    local raidName = nil
+    if type(GetInstanceInfo) == "function" then
+        local iname, itype = GetInstanceInfo()
+        if itype == "raid" then
+            raidName = iname
+        end
+    elseif ev == "RAID_INSTANCE_WELCOME" then
+        raidName = arg or (type(GetRealZoneText) == "function" and GetRealZoneText())
+    end
+    if not raidName or raidName == "" then return end
+    if IsRaidSaved(raidName) then
+        self:ResetTrace("Entered saved raid (ignored): " .. raidName)
+        return
+    end
+    local db = EnsureResetTrackerDB()
+    local key = NormRaidName(raidName)
+    if db.activeUnsavedRaid ~= key then
+        db.activeUnsavedRaid = key
+        local log = self:InstanceLog()
+        local limit = self:InstanceLimit()
+        if table.getn(log.entries) < limit then
+            table.insert(log.entries, time())
+        end
+        self:ResetTrace("Entered unsaved raid: " .. raidName .. " used=" .. table.getn(log.entries) .. "/" .. limit)
+        self:UpdateResetTrackerFrame()
+    end
+end
+
+function MMM:OnGroupStateChanged()
+    local inGroup = IsInGroup()
+    if inGroup ~= self.wasInGroup then
+        local db = EnsureResetTrackerDB()
+        local cleared = false
+        if db.activeUnsavedRaid then
+            db.activeUnsavedRaid = nil
+            cleared = true
+        end
+        local store = self.DungeonStore and self:DungeonStore()
+        if store then
+            for key in pairs(store) do
+                if key ~= self.currentDungeon then
+                    store[key] = nil
+                    cleared = true
+                end
+            end
+        end
+        if cleared then
+            local reason = inGroup and "Joined new party/raid" or "Left party/raid"
+            self:ResetTrace(reason .. ": cleared un-saved active instance state (silent server reset)")
+            if self.InvalidateCache then self:InvalidateCache() end
+            if self.RefreshMarkers then self:RefreshMarkers() end
+        end
+    end
+    self.wasInGroup = inGroup
+end
+
+-- Initialize on VARIABLES_LOADED / PLAYER_ENTERING_WORLD and track silent group-join resets
 local loader = CreateFrame("Frame")
 loader:RegisterEvent("VARIABLES_LOADED")
 loader:RegisterEvent("PLAYER_ENTERING_WORLD")
+loader:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+loader:RegisterEvent("RAID_INSTANCE_WELCOME")
+loader:RegisterEvent("PARTY_MEMBERS_CHANGED")
+loader:RegisterEvent("RAID_ROSTER_UPDATE")
 loader:SetScript("OnEvent", function()
-    MMM:CreateResetTrackerFrame()
-    MMM:RestoreResetFramePosition()
-    MMM:UpdateResetTrackerFrame()
+    if event == "VARIABLES_LOADED" or event == "PLAYER_ENTERING_WORLD" then
+        MMM:CreateResetTrackerFrame()
+        MMM:RestoreResetFramePosition()
+        MMM.wasInGroup = IsInGroup()
+        MMM:CheckRaidEntry(event, arg1)
+        MMM:UpdateResetTrackerFrame()
+    elseif event == "ZONE_CHANGED_NEW_AREA" or event == "RAID_INSTANCE_WELCOME" then
+        MMM:CheckRaidEntry(event, arg1)
+        MMM:UpdateResetTrackerFrame()
+    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
+        MMM:OnGroupStateChanged()
+    end
 end)
 
 -- Slash command: /mmmreset [show|hide|lock|resetpos|trace|status]

@@ -8,18 +8,21 @@ Only one client mod is used, and it is optional.
 
 | Client mod | Used for | Without it |
 |---|---|---|
-| [ClassicAPI](https://github.com/brues-code/ClassicAPI) (v1.12.7+) | `C_Map` (`GetMapChildrenInfo`, `GetFallbackWorldMapID`, `GetPlayerMapPosition`, `GetMapWorldSize`, `SetUserWaypoint`, `GetUserWaypoint`, `HasUserWaypoint`, `ClearUserWaypoint`, `GetUserWaypointPositionForMap`, `CanSetUserWaypointOnMap`), `UiMapPoint`, `GetInstanceInfo`, and the `USER_WAYPOINT_UPDATED` event | Live distance and waypoints are unavailable; zone-based dungeon detection falls back to `GetRealZoneText()`. Everything else works. |
+| [ClassicAPI](https://github.com/brues-code/ClassicAPI) (v1.12.7+) | `C_Map` (`GetMapChildrenInfo`, `GetFallbackWorldMapID`, `GetPlayerMapPosition`, `GetMapWorldSize`, `SetUserWaypoint`, `GetUserWaypoint`, `HasUserWaypoint`, `ClearUserWaypoint`, `GetUserWaypointPositionForMap`, `CanSetUserWaypointOnMap`), `UiMapPoint`, `GetInstanceInfo`, and the `USER_WAYPOINT_UPDATED` event | Live distance and waypoints are unavailable; zone and raid detection falls back to `GetRealZoneText()` and `RAID_INSTANCE_WELCOME`. Everything else works. |
 
 Lockouts, reset tracking, Find highlight and all original features use only the stock 1.12 API.
 
 ## What was added / improved
 
 ### Version 2.9
-- **Remaining `ResetInstances()` counter on dungeon tooltips** – hovering any dungeon marker on the world map (including `InstanceJournal` POI submap pins) now shows `Resets left: X/5` along with the cooldown until the next slot (`Next: MM:SS`) and full reset (`Full CD: MM:SS`).
-- **Raid + dungeon `ResetInstances()` counting** – `ResetInstances()` resets all un-saved instances in-game (both dungeons and raids). Any un-saved raid resets confirmed by the server (`"<name> has been reset."`) are now counted toward the hourly instance limit without double-counting tracked dungeons.
-- **WTF persistence** – all reset timestamps and tracker UI settings are stored in `ModernMapMarkersDB` (`WTF\Account\<Account>\SavedVariables\ModernMapMarkers.lua`), surviving `WDB` auto-deletion on client launch.
+- **Remaining `ResetInstances()` counter on dungeon tooltips** – hovering any dungeon marker on the world map (including `InstanceJournal` POI submap pins) shows `Resets left: X/5` along with the cooldown until the next slot (`Next: MM:SS`) and full reset (`Full CD: MM:SS`).
+- **Full dungeon & un-saved raid reset tracking** –
+  - Tracks 5-man dungeon entries via zone/instance checks and tracks un-saved raid entries (`CheckRaidEntry`), while ignoring raids you are already saved to (`GetLockout` / `GetSavedInstanceInfo`).
+  - Counts manual `ResetInstances()` calls and chat-announced auto/leader resets (`"<name> has been reset."`) without double-counting already-tracked instances.
+  - Detects **silent server auto-resets** on group transitions (`PARTY_MEMBERS_CHANGED` / `RAID_ROSTER_UPDATE` when joining a new party/raid or leaving a group to go solo), clearing un-saved active dungeon/raid state so the next entry is counted accurately even when no system chat line appears.
+- **WTF persistence** – all reset timestamps, active un-saved instance state, and tracker UI settings are stored in `ModernMapMarkersDB` (`WTF\Account\<Account>\SavedVariables\ModernMapMarkers.lua`), surviving `WDB` auto-deletion on client launch.
 - **Movable `[X/5 - CD]` HUD frame (`ModernMapMarkersResetFrame`)** – displays remaining resets (`X/5`) and the cooldown until all slots are restored to full (`Ready` or `MM:SS`), color-coded by availability, with a detailed hover tooltip. Drag with left-click to reposition.
-- **Debug tracing & `/mmmreset` commands** – `/mmmreset` (toggle), `/mmmreset show|hide`, `/mmmreset lock`, `/mmmreset resetpos`, `/mmmreset status`, and `/mmmreset trace` (live chat tracing for state changes, extra resets, and position saves).
+- **Debug tracing & `/mmmreset` commands** – `/mmmreset` (toggle), `/mmmreset show|hide`, `/mmmreset lock`, `/mmmreset resetpos`, `/mmmreset status`, and `/mmmreset trace` (live chat tracing for state changes, raid/dungeon entries, silent group-change resets, and position saves).
 
 ### Version 2.8
 - Recognises the game's reset message with or without a trailing period, displays hourly instance limit timers on dungeons, and adds `/mmmlock` diagnostics.
@@ -67,7 +70,7 @@ Lockouts, reset tracking, Find highlight and all original features use only the 
 ## Known limitations
 - Distance and waypoints rely on matching zone names between `GetMapZones()` and ClassicAPI's map list.
 - With InstanceJournal installed, markers that IJ covers are hidden, so the Find pulse cannot show on them.
-- Dungeon tracking is inferred from zone/instance events and server reset messages. The 1-hour idle expiry and 5-per-hour limit are defaults (`/mmmlock limit <n>` adjusts the cap; `/mmmlock clear` clears wrong entries).
+- In Vanilla 1.12, 5-man dungeons do not expose a client-side `dungeonID` (`GetSavedInstanceInfo()` only reports saved raids). Dungeon tracking and silent group-change resets are inferred from zone/instance events, group state transitions, and server reset messages. The 1-hour idle expiry and 5-per-hour limit are defaults (`/mmmlock limit <n>` adjusts the cap; `/mmmlock clear` clears wrong entries).
 - Inside Blackrock Spire the zone name is shared by Lower and Upper halves; the sub-zone decides which one is marked.
 
 ## Credits
