@@ -25,6 +25,24 @@ local function EnsureResetTrackerDB()
     return ModernMapMarkersDB.resetTracker
 end
 
+local function CharKey()
+    return (UnitName("player") or "?") .. "-" .. ((GetRealmName and GetRealmName()) or "?")
+end
+
+local function GetActiveUnsavedRaid()
+    local db = EnsureResetTrackerDB()
+    if type(db.activeUnsavedRaidByChar) ~= "table" then return nil end
+    return db.activeUnsavedRaidByChar[CharKey()]
+end
+
+local function SetActiveUnsavedRaid(val)
+    local db = EnsureResetTrackerDB()
+    if type(db.activeUnsavedRaidByChar) ~= "table" then
+        db.activeUnsavedRaidByChar = {}
+    end
+    db.activeUnsavedRaidByChar[CharKey()] = val
+end
+
 function MMM:IsResetDebug()
     local db = EnsureResetTrackerDB()
     return db.debug == true
@@ -85,9 +103,8 @@ end
 function MMM:OnExtraInstanceResets(count)
     if not self:DungeonTrackingEnabled() then return end
     if not count or count <= 0 then return end
-    local db = EnsureResetTrackerDB()
-    if db.activeUnsavedRaid then
-        db.activeUnsavedRaid = nil
+    if GetActiveUnsavedRaid() then
+        SetActiveUnsavedRaid(nil)
         count = count - 1
         self:ResetTrace("Cleared activeUnsavedRaid on explicit reset; remaining extra=" .. count)
         if count <= 0 then
@@ -314,10 +331,9 @@ function MMM:CheckRaidEntry(ev, arg)
         self:ResetTrace("Entered saved raid (ignored): " .. raidName)
         return
     end
-    local db = EnsureResetTrackerDB()
     local key = NormRaidName(raidName)
-    if db.activeUnsavedRaid ~= key then
-        db.activeUnsavedRaid = key
+    if GetActiveUnsavedRaid() ~= key then
+        SetActiveUnsavedRaid(key)
         local log = self:InstanceLog()
         local limit = self:InstanceLimit()
         if table.getn(log.entries) < limit then
@@ -330,11 +346,14 @@ end
 
 function MMM:OnGroupStateChanged()
     local inGroup = IsInGroup()
+    if self.wasInGroup == nil then
+        self.wasInGroup = inGroup
+        return
+    end
     if inGroup ~= self.wasInGroup then
-        local db = EnsureResetTrackerDB()
         local cleared = false
-        if db.activeUnsavedRaid then
-            db.activeUnsavedRaid = nil
+        if GetActiveUnsavedRaid() then
+            SetActiveUnsavedRaid(nil)
             cleared = true
         end
         local store = self.DungeonStore and self:DungeonStore()
@@ -365,11 +384,23 @@ loader:RegisterEvent("RAID_INSTANCE_WELCOME")
 loader:RegisterEvent("PARTY_MEMBERS_CHANGED")
 loader:RegisterEvent("RAID_ROSTER_UPDATE")
 loader:SetScript("OnEvent", function()
-    if event == "VARIABLES_LOADED" or event == "PLAYER_ENTERING_WORLD" then
+    if event == "VARIABLES_LOADED" then
         MMM:CreateResetTrackerFrame()
         MMM:RestoreResetFramePosition()
         MMM.wasInGroup = IsInGroup()
-        MMM:CheckRaidEntry(event, arg1)
+        MMM:UpdateResetTrackerFrame()
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        MMM:CreateResetTrackerFrame()
+        MMM:RestoreResetFramePosition()
+        if MMM.wasInGroup == nil then
+            MMM.wasInGroup = IsInGroup()
+        end
+        -- Skip CheckRaidEntry on initial login before GetSavedInstanceInfo() has arrived from server;
+        -- subsequent zoning fires ZONE_CHANGED_NEW_AREA / RAID_INSTANCE_WELCOME.
+        if MMM.hasEnteredWorldOnce then
+            MMM:CheckRaidEntry(event, arg1)
+        end
+        MMM.hasEnteredWorldOnce = true
         MMM:UpdateResetTrackerFrame()
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "RAID_INSTANCE_WELCOME" then
         MMM:CheckRaidEntry(event, arg1)
