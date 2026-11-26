@@ -2,17 +2,36 @@
 
 Places markers on the world map to show the locations of dungeons, raids, world bosses, boats, zeppelins and trams. Supports enUS, esES, deDE, ptBR and zhCN clients.
 
+**Repository:** https://github.com/mycoursehqazsedc00-boop/ModernMapMarkers
+
 ## Client mods
 
 Only one client mod is used, and it is optional.
 
 | Client mod | Used for | Without it |
 |---|---|---|
-| [ClassicAPI](https://github.com/brues-code/ClassicAPI) (v1.12.7+) | `C_Map` (`GetMapChildrenInfo`, `GetFallbackWorldMapID`, `GetPlayerMapPosition`, `GetMapWorldSize`, `SetUserWaypoint`, `GetUserWaypoint`, `HasUserWaypoint`, `ClearUserWaypoint`, `GetUserWaypointPositionForMap`, `CanSetUserWaypointOnMap`), `UiMapPoint`, `GetInstanceInfo`, and the `USER_WAYPOINT_UPDATED` event | Live distance and waypoints are unavailable; zone and raid detection falls back to `GetRealZoneText()` and `RAID_INSTANCE_WELCOME`. Everything else works. |
+| [ClassicAPI](https://github.com/brues-code/ClassicAPI) (v1.12.7+) | `C_Map` (`GetMapChildrenInfo`, `GetFallbackWorldMapID`, `GetPlayerMapPosition`, `GetMapWorldSize`, `SetUserWaypoint`, `GetUserWaypoint`, `HasUserWaypoint`, `ClearUserWaypoint`, `GetUserWaypointPositionForMap`, `CanSetUserWaypointOnMap`), `UiMapPoint`, `GetInstanceInfo`, and the `USER_WAYPOINT_UPDATED` event | Live distance and `C_Map` waypoints are unavailable (`pfQuest` HUD navigation arrow still works if `pfQuest` is installed); zone and raid detection falls back to `GetRealZoneText()` and `RAID_INSTANCE_WELCOME`. Everything else works. |
 
 Lockouts, reset tracking, Find highlight and all original features use only the stock 1.12 API.
 
+## Companion & Integrated Addons
+- **[Magnify](https://github.com/mycoursehqazsedc00-boop/Magnify)** — Full two-way synergy:
+  - Selecting any dungeon, raid, or world boss in **Find Marker** automatically zooms (`1.6x`) and centers on the marker via `Magnify_FocusOnPoint`.
+  - Marker icons and waypoint pins automatically re-apply inverse scaling (`Magnify_UpdatePinScales`) after filter changes or map redraws while zoomed in.
+  - Dropdowns and the Find Marker panel automatically stay on `FULLSCREEN_DIALOG` strata above `Magnify`'s scroll frame.
+- **Also integrated with:** `pfQuest` (`Ctrl+Left-click` feeds destination into `pfQuest`'s 3D HUD arrow; dropdown positioning), `pfUI` (dropdown, button, and search box skinning), and `InstanceJournal` (left-click submap, right-click journal page, standalone Find pulse fallback).
+
 ## What was added / improved
+
+### Version 2.10 (Magnify & pfQuest Synergy + Find Panel Upgrades)
+- **[Magnify](https://github.com/mycoursehqazsedc00-boop/Magnify) Zoom-to-Marker & Inverse-Scale Sync:**
+  - Selecting an entry in `Find Marker` automatically zooms and centers on the marker when [Magnify](https://github.com/mycoursehqazsedc00-boop/Magnify) is installed (`Magnify_FocusOnPoint`).
+  - Re-applies `Magnify_UpdatePinScales` after marker redraws and waypoint pin updates so icons stay crisp when the map is already zoomed.
+  - Keeps `Filter Markers`, `Find Marker`, and `Find Panel` on `FULLSCREEN_DIALOG` strata above `Magnify`'s `WorldMapFrameScrollFrame` (including windowed mode).
+- **Standalone Find Pulse (InstanceJournal compatible):** Displays an inverse-scaled pulsing ring at the marker's coordinates even when `InstanceJournal` hides ModernMapMarkers' own icon.
+- **`pfQuest` 3D Navigation Arrow Bridge:** `Ctrl+Left-click` on any marker also feeds the destination into `pfQuest`'s on-screen navigation arrow (`pfMap:AddNode` + `pfQuest.route.SetTarget`), even without `ClassicAPI`; `Right-click` on the waypoint pin clears both.
+- **Live Search Box & Level Difficulty Colors in `Find Marker`:** Type any dungeon, raid, world boss, or zone name (localized or English) to filter across all continents immediately (press `Enter` to jump to the top match); level ranges are color-coded relative to your character's level (red / orange / yellow / green / grey).
+- **Chat Coordinate & Lockout Sharing:** `Shift+Right-click` any marker to insert `[Name - Zone (X, Y)]` (plus `[Saved: ...]` if locked) directly into chat.
 
 ### Version 2.9
 - **Remaining `ResetInstances()` counter on dungeon tooltips** – hovering any dungeon marker on the world map (including `InstanceJournal` POI submap pins) shows `Resets left: X/5` along with the cooldown until the next slot (`Next: MM:SS`) and full reset (`Full CD: MM:SS`).
@@ -53,8 +72,9 @@ Lockouts, reset tracking, Find highlight and all original features use only the 
 | Hover a marker | Name, level or faction, lockout timer, remaining resets & CD, distance |
 | Left-click a marker | View instance map (InstanceJournal installed) |
 | Right-click a marker | Open InstanceJournal page |
-| Ctrl+Left-click a marker | Set a map waypoint (ClassicAPI) |
-| Right-click the waypoint pin | Clear the waypoint |
+| Ctrl+Left-click a marker | Set a map waypoint (ClassicAPI) and/or `pfQuest` HUD navigation arrow |
+| Shift+Right-click a marker | Share `[Name - Zone (X, Y)]` (and lockout if saved) into chat |
+| Right-click the waypoint pin | Clear the waypoint (and `pfQuest` arrow) |
 | Drag `[5/5 - Ready]` frame | Move the reset tracker HUD (saved in WTF) |
 | `/mmm` | Toggle world map dropdown menus |
 | `/mmmreset` | Show/hide the movable `[X/5 - CD]` reset tracker frame |

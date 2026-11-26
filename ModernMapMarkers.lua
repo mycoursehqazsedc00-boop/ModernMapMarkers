@@ -259,20 +259,87 @@ function MMM:GetDistanceYards(mapID, x, y)
 end
 
 -- ---------------------------------------------------------------------------
--- Waypoint (C_Map user waypoint) - Ctrl+Left-click a marker to set it
+-- Waypoint (C_Map user waypoint + optional pfQuest HUD arrow bridge)
 -- ---------------------------------------------------------------------------
-function MMM:SetWaypointToMarker(marker)
-    if not HasWaypointAPI() or not marker.posX then return false end
-    local id = self:GetMapIDForZone(marker.continent, marker.zoneName)
-    if not id then return false end
-    if type(C_Map.CanSetUserWaypointOnMap) == "function" then
-        local okCan, can = pcall(C_Map.CanSetUserWaypointOnMap, id)
-        if okCan and can == false then return false end
+local function HasPfQuestArrow()
+    return type(pfMap) == "table" and type(pfMap.AddNode) == "function"
+       and type(pfMap.DeleteNode) == "function" and type(pfMap.GetMapID) == "function"
+end
+
+function MMM:SetPfQuestArrow(marker)
+    if not HasPfQuestArrow() or not marker or not marker.posX or not marker.posY then return false end
+    local zoneIndex = self:GetZoneIndex(marker.continent, marker.zoneName)
+    local mapID = (zoneIndex and zoneIndex > 0) and pfMap:GetMapID(marker.continent, zoneIndex) or nil
+    if not mapID and type(pfMap.GetMapIDByName) == "function" then
+        mapID = pfMap:GetMapIDByName(L:GetLocalizedZoneName(marker.zoneName)) or pfMap:GetMapIDByName(marker.zoneName)
     end
-    local okPt, pt = pcall(UiMapPoint.CreateFromCoordinates, id, marker.posX, marker.posY)
-    if not okPt or not pt then return false end
-    local ok, res = pcall(C_Map.SetUserWaypoint, pt)
-    if ok and res ~= false then
+    if not mapID then return false end
+
+    pcall(pfMap.DeleteNode, pfMap, "MMM")
+    local title = marker.name or marker.nameEN or T("Waypoint")
+    local meta = {
+        addon = "MMM",
+        zone = mapID,
+        x = math.floor(marker.posX * 1000 + 0.5) / 10,
+        y = math.floor(marker.posY * 1000 + 0.5) / 10,
+        title = title,
+        description = (L:GetLocalizedZoneName(marker.zoneName) or marker.zoneName or "") .. " (ModernMapMarkers)",
+        arrow = true,
+        layer = 4,
+    }
+    local ok = pcall(pfMap.AddNode, pfMap, meta)
+    if ok then
+        if pfQuest and pfQuest.route and type(pfQuest.route.SetTarget) == "function" then
+            pcall(pfQuest.route.SetTarget, { title = title, layer = 4 })
+        end
+        if type(pfMap.UpdateNodes) == "function" then
+            pcall(pfMap.UpdateNodes, pfMap)
+        end
+        return true
+    end
+    return false
+end
+
+function MMM:ClearPfQuestArrow()
+    if not HasPfQuestArrow() then return end
+    pcall(pfMap.DeleteNode, pfMap, "MMM")
+    if pfQuest and pfQuest.route and type(pfQuest.route.SetTarget) == "function" then
+        pcall(pfQuest.route.SetTarget, nil)
+    end
+    if type(pfMap.UpdateNodes) == "function" then
+        pcall(pfMap.UpdateNodes, pfMap)
+    end
+end
+
+function MMM:SetWaypointToMarker(marker)
+    if not marker or not marker.posX then return false end
+    local setAny = false
+
+    if HasWaypointAPI() then
+        local id = self:GetMapIDForZone(marker.continent, marker.zoneName)
+        if id then
+            local canSet = true
+            if type(C_Map.CanSetUserWaypointOnMap) == "function" then
+                local okCan, can = pcall(C_Map.CanSetUserWaypointOnMap, id)
+                if okCan and can == false then canSet = false end
+            end
+            if canSet then
+                local okPt, pt = pcall(UiMapPoint.CreateFromCoordinates, id, marker.posX, marker.posY)
+                if okPt and pt then
+                    local ok, res = pcall(C_Map.SetUserWaypoint, pt)
+                    if ok and res ~= false then
+                        setAny = true
+                    end
+                end
+            end
+        end
+    end
+
+    if self:SetPfQuestArrow(marker) then
+        setAny = true
+    end
+
+    if setAny then
         Msg(T("Waypoint set:") .. " " .. (marker.name or ""))
         return true
     end
@@ -282,6 +349,25 @@ end
 function MMM:ClearWaypoint()
     if type(C_Map) == "table" and type(C_Map.ClearUserWaypoint) == "function" then
         pcall(C_Map.ClearUserWaypoint)
+    end
+    self:ClearPfQuestArrow()
+end
+
+function MMM:ShareMarkerToChat(marker)
+    if not marker or not marker.posX or not marker.posY then return end
+    local name = marker.name or marker.nameEN or ""
+    local zone = L:GetLocalizedZoneName(marker.zoneName) or marker.zoneName or ""
+    local text = string.format("[%s - %s (%.1f, %.1f)]", name, zone, marker.posX * 100, marker.posY * 100)
+    if marker.markerType == "DUNGEON" or marker.markerType == "RAID" then
+        local remain = MMM:GetLockout(marker.nameEN)
+        if remain then
+            text = text .. " [" .. T("Saved") .. ": " .. FormatDuration(remain) .. "]"
+        end
+    end
+    if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+        ChatFrameEditBox:Insert(text)
+    elseif ChatFrame_OpenChat then
+        ChatFrame_OpenChat(text)
     end
 end
 
@@ -377,7 +463,12 @@ function MMM:UpdateWaypointPin()
     pin:ClearAllPoints()
     pin:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT",
         x * WorldMapDetailFrame:GetWidth(), -y * WorldMapDetailFrame:GetHeight())
+    pin._magnifyBaseW = 26
+    pin._magnifyBaseH = 26
     pin:Show()
+    if Magnify_UpdatePinScales and WorldMapDetailFrame then
+        Magnify_UpdatePinScales(WorldMapDetailFrame:GetScale(), true)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -900,18 +991,44 @@ end
 
 -- ---------------------------------------------------------------------------
 -- "Find Marker" highlight: pulse the found marker for a few seconds
+-- Also shows a standalone pulse ring when InstanceJournal hides MMM's icon.
 -- ---------------------------------------------------------------------------
-function MMM:StartHighlight(baseName)
+function MMM:GetOrCreateStandalonePulse()
+    if self.standalonePulse then return self.standalonePulse end
+    local f = CreateFrame("Frame", "ModernMapMarkersFindPulse", WorldMapButton)
+    f:SetWidth(1)
+    f:SetHeight(1)
+    f:SetFrameLevel(WorldMapButton:GetFrameLevel() + 12)
+    local tex = f:CreateTexture(nil, "OVERLAY")
+    tex:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    tex:SetBlendMode("ADD")
+    tex:SetWidth(52)
+    tex:SetHeight(52)
+    tex:SetPoint("CENTER", f, "CENTER", 0, 0)
+    f.glow = tex
+    f:Hide()
+    self.standalonePulse = f
+    return f
+end
+
+function MMM:StartHighlight(baseName, posX, posY)
     self.highlightBase  = baseName
+    self.highlightX     = posX
+    self.highlightY     = posY
     self.highlightUntil = GetTime() + 8
     if not self.pulse then self.pulse = CreateFrame("Frame") end
     self.pulse:SetScript("OnUpdate", function()
         local now = GetTime()
         if not MMM.highlightBase or now >= MMM.highlightUntil then
             MMM.highlightBase = nil
+            MMM.highlightX = nil
+            MMM.highlightY = nil
             for i = 1, table.getn(MMM.markers) do
                 MMM.markers[i].glow:Hide()
                 MMM.markers[i].glowOn = false
+            end
+            if MMM.standalonePulse then
+                MMM.standalonePulse:Hide()
             end
             this:SetScript("OnUpdate", nil)
             return
@@ -919,6 +1036,13 @@ function MMM:StartHighlight(baseName)
         local a = 0.55 + 0.45 * math.sin(now * 7)
         for i = 1, table.getn(MMM.markers) do
             if MMM.markers[i].glowOn then MMM.markers[i].glow:SetAlpha(a) end
+        end
+        if MMM.standalonePulse and MMM.standalonePulse:IsShown() then
+            local scale = WorldMapDetailFrame and WorldMapDetailFrame:GetScale() or 1
+            local sz = 52 / ((scale > 0) and scale or 1)
+            MMM.standalonePulse.glow:SetWidth(sz)
+            MMM.standalonePulse.glow:SetHeight(sz)
+            MMM.standalonePulse.glow:SetAlpha(a)
         end
     end)
 end
@@ -1089,14 +1213,17 @@ function MMM:RefreshMarkersInner()
                 markerIndex = markerIndex + 1
                 local marker = self:GetOrCreateMarker(markerIndex)
 
-                -- Sizing
+                -- Sizing (record unscaled base size for Magnify inverse-scaling)
+                local baseSize
                 if data.type == "DUNGEON" or data.type == "RAID" or data.type == "WORLDBOSS" then
-                    marker:SetWidth(32)
-                    marker:SetHeight(32)
+                    baseSize = 32
                 else
-                    marker:SetWidth(24)
-                    marker:SetHeight(24)
+                    baseSize = 24
                 end
+                marker._magnifyBaseW = baseSize
+                marker._magnifyBaseH = baseSize
+                marker:SetWidth(baseSize)
+                marker:SetHeight(baseSize)
 
                 -- Position
                 local width  = WorldMapDetailFrame:GetWidth()
@@ -1151,6 +1278,34 @@ function MMM:RefreshMarkersInner()
 
     -- Hide any excess markers from the previous zone
     self:HideMarkersFrom(markerIndex + 1)
+
+    -- Standalone Find pulse fallback (e.g. when InstanceJournal hides MMM's marker)
+    if MMM.highlightBase and now < MMM.highlightUntil and MMM.highlightX and MMM.highlightY then
+        local anyMarkerGlowing = false
+        for i = 1, markerIndex do
+            if self.markers[i] and self.markers[i].glowOn then
+                anyMarkerGlowing = true
+                break
+            end
+        end
+        if not anyMarkerGlowing then
+            local sp = self:GetOrCreateStandalonePulse()
+            sp:ClearAllPoints()
+            sp:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT",
+                MMM.highlightX * WorldMapDetailFrame:GetWidth(),
+                -MMM.highlightY * WorldMapDetailFrame:GetHeight())
+            sp:Show()
+        elseif self.standalonePulse then
+            self.standalonePulse:Hide()
+        end
+    elseif self.standalonePulse then
+        self.standalonePulse:Hide()
+    end
+
+    -- Re-apply Magnify inverse pin scaling if map is currently zoomed
+    if Magnify_UpdatePinScales and WorldMapDetailFrame then
+        Magnify_UpdatePinScales(WorldMapDetailFrame:GetScale(), true)
+    end
 end
 
 -- Hide all markers in the pool
@@ -1184,7 +1339,13 @@ end
 
 -- InstanceJournal Integration
 function MMM:OnMarkerClick(marker, button)
-    -- Ctrl+Left-click: drop a waypoint on this marker (needs ClassicAPI)
+    -- Shift+Right-click: share marker location (and lockout if saved) to chat
+    if button == "RightButton" and IsShiftKeyDown() then
+        MMM:ShareMarkerToChat(marker)
+        return
+    end
+
+    -- Ctrl+Left-click: drop a waypoint on this marker (ClassicAPI and/or pfQuest arrow)
     if button == "LeftButton" and IsControlKeyDown() then
         if MMM:SetWaypointToMarker(marker) then return end
     end
@@ -1264,9 +1425,10 @@ function MMM:ShowMarkerTooltip(m)
         WorldMapTooltip:AddLine(T("Left-Click: View Map"), 0.5, 0.5, 0.5)
         WorldMapTooltip:AddLine(T("Right-Click: Instance Journal"), 0.5, 0.5, 0.5)
     end
-    if HasWaypointAPI() then
+    if HasWaypointAPI() or HasPfQuestArrow() then
         WorldMapTooltip:AddLine(T("Ctrl+Click: Set Waypoint"), 0.5, 0.5, 0.5)
     end
+    WorldMapTooltip:AddLine("Shift+Right-Click: Share in Chat", 0.5, 0.5, 0.5)
 
     WorldMapTooltip:Show()
 end
@@ -1353,9 +1515,13 @@ function ModernMapMarkers_FindMarker(dataIndex)
         end
     end
 
-    MMM:StartHighlight(BaseName(data.name))
+    MMM:StartHighlight(BaseName(data.name), data.x, data.y)
     MMM:InvalidateCache()
     MMM:RefreshMarkers()
+
+    if Magnify_FocusOnPoint and data.x and data.y then
+        Magnify_FocusOnPoint(data.x, data.y, 1.6)
+    end
 end
 
 local original_WorldMapFrame_Update = WorldMapFrame_Update

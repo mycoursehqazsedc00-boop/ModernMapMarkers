@@ -95,10 +95,12 @@ function MMM_GUI.InitializeWorldMapControls()
         dropdownParent = _G.pfQuestMapDropdown:GetParent() or dropdownParent
     end
 
+    local targetStrata = (WorldMapFrameScrollFrame and "FULLSCREEN_DIALOG") or dropdownParent:GetFrameStrata()
+
     -- Filter Dropdown
     local filterFrame = CreateFrame("Frame", "ModernMapMarkersFilter_Blizz", dropdownParent, "UIDropDownMenuTemplate")
 
-    filterFrame:SetFrameStrata(dropdownParent:GetFrameStrata())
+    filterFrame:SetFrameStrata(targetStrata)
     filterFrame:SetFrameLevel(dropdownParent:GetFrameLevel() + 10)
     
     local filterBtn = getglobal(filterFrame:GetName().."Button")
@@ -273,11 +275,33 @@ function MMM_GUI.InitializeWorldMapControls()
         end
     end
 
+    -- Search box at the top of Find Marker Panel
+    local SEARCH_HEIGHT = 20
+    local searchBox = CreateFrame("EditBox", "MMMFind_SearchBox", findPanel)
+    searchBox:SetHeight(SEARCH_HEIGHT)
+    searchBox:SetPoint("TOPLEFT", findPanel, "TOPLEFT", PANEL_PADDING, -PANEL_PADDING)
+    searchBox:SetPoint("TOPRIGHT", findPanel, "TOPRIGHT", -PANEL_PADDING, -PANEL_PADDING)
+    searchBox:SetAutoFocus(false)
+    searchBox:SetFontObject(GameFontHighlightSmall)
+    searchBox:SetTextInsets(6, 6, 2, 2)
+    searchBox:SetBackdrop({
+        bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    searchBox:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
+    searchBox:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
+
+    local searchPlaceholder = searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    searchPlaceholder:SetPoint("LEFT", searchBox, "LEFT", 6, 0)
+    searchPlaceholder:SetText("Search dungeon, raid, boss...")
+
     -- Continent buttons
     local halfWidth = (PANEL_WIDTH - PANEL_PADDING * 2 - BUTTON_SPACING) / 2
 
     local btnKalimdor = CreateSelectorButton("MMMFind_Kalimdor", findPanel, halfWidth, L:GetLocalizedZoneName("Kalimdor"))
-    btnKalimdor:SetPoint("TOPLEFT", findPanel, "TOPLEFT", PANEL_PADDING, -PANEL_PADDING)
+    btnKalimdor:SetPoint("TOPLEFT", searchBox, "BOTTOMLEFT", 0, -BUTTON_SPACING - 2)
 
     local btnEK = CreateSelectorButton("MMMFind_EK", findPanel, halfWidth, L:GetLocalizedZoneName("Eastern Kingdoms"))
     btnEK:SetPoint("TOPLEFT", btnKalimdor, "TOPRIGHT", BUTTON_SPACING, 0)
@@ -295,7 +319,7 @@ function MMM_GUI.InitializeWorldMapControls()
     btnWorldBoss:SetPoint("TOPLEFT", btnRaid, "TOPRIGHT", BUTTON_SPACING, 0)
 
     -- Scroll frame for the instance list
-    local listAreaTop = PANEL_PADDING + BUTTON_HEIGHT * 2 + BUTTON_SPACING * 2 + 4
+    local listAreaTop = PANEL_PADDING + SEARCH_HEIGHT + BUTTON_SPACING + 2 + BUTTON_HEIGHT * 2 + BUTTON_SPACING * 2 + 4
 
     local scrollFrame = CreateFrame("ScrollFrame", "MMMFind_Scroll", findPanel, "FauxScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", findPanel, "TOPLEFT", PANEL_PADDING, -listAreaTop)
@@ -356,13 +380,66 @@ function MMM_GUI.InitializeWorldMapControls()
         return alvl < blvl
     end
 
+    -- Difficulty color relative to current player level
+    local function GetLevelDifficultyColor(desc)
+        local pLvl = UnitLevel("player") or 0
+        if pLvl <= 0 or not desc then return 0.7, 0.7, 0.7 end
+        local _, _, minStr, maxStr = string.find(desc, "(%d+)%s*%-%s*(%d+)")
+        local minLvl, maxLvl
+        if minStr and maxStr then
+            minLvl = tonumber(minStr)
+            maxLvl = tonumber(maxStr)
+        else
+            local _, _, singleStr = string.find(desc, "(%d+)")
+            minLvl = tonumber(singleStr)
+            maxLvl = minLvl
+        end
+        if not minLvl then return 0.7, 0.7, 0.7 end
+        if pLvl <= minLvl - 5 then
+            return 1.0, 0.25, 0.25 -- red
+        elseif pLvl < minLvl then
+            return 1.0, 0.55, 0.20 -- orange
+        elseif pLvl <= maxLvl then
+            return 1.0, 0.90, 0.20 -- yellow
+        elseif pLvl <= maxLvl + 5 then
+            return 0.30, 0.90, 0.30 -- green
+        else
+            return 0.55, 0.55, 0.55 -- grey
+        end
+    end
+
     local function RefreshFindList()
         local flatData = ModernMapMarkers_GetFlatData()
         currentList = {}
 
-        for _, data in ipairs(flatData) do
-            if data.continent == activeContinent and data.type == activeType then
-                table.insert(currentList, data)
+        local query = string.lower(searchBox:GetText() or "")
+        query = string.gsub(query, "^%s+", "")
+        query = string.gsub(query, "%s+$", "")
+
+        if query ~= "" then
+            searchPlaceholder:Hide()
+            for _, data in ipairs(flatData) do
+                if data.type == "DUNGEON" or data.type == "RAID" or data.type == "WORLDBOSS" then
+                    local locName = string.lower(L:GetLocalizedMarkerName(data.name) or "")
+                    local enName  = string.lower(data.name or "")
+                    local locZone = string.lower(L:GetLocalizedZoneName(data.zoneName) or "")
+                    local enZone  = string.lower(data.zoneName or "")
+                    if string.find(locName, query, 1, true)
+                       or string.find(enName, query, 1, true)
+                       or string.find(locZone, query, 1, true)
+                       or string.find(enZone, query, 1, true) then
+                        table.insert(currentList, data)
+                    end
+                end
+            end
+        else
+            if not searchBox._focused then
+                searchPlaceholder:Show()
+            end
+            for _, data in ipairs(flatData) do
+                if data.continent == activeContinent and data.type == activeType then
+                    table.insert(currentList, data)
+                end
             end
         end
         table.sort(currentList, sortLvl)
@@ -370,7 +447,7 @@ function MMM_GUI.InitializeWorldMapControls()
         local totalRows = table.getn(currentList)
         local displayRows = math.min(totalRows, MAX_VISIBLE_ROWS)
 
-        local panelHeight = listAreaTop + (displayRows * ROW_HEIGHT) + PANEL_PADDING + 4
+        local panelHeight = listAreaTop + (math.max(1, displayRows) * ROW_HEIGHT) + PANEL_PADDING + 4
         if totalRows > MAX_VISIBLE_ROWS then
             panelHeight = listAreaTop + (MAX_VISIBLE_ROWS * ROW_HEIGHT) + PANEL_PADDING + 4
         end
@@ -392,6 +469,8 @@ function MMM_GUI.InitializeWorldMapControls()
 
                 if data.description then
                     row.lvlText:SetText(lvlLabel .. " " .. data.description)
+                    local r, g, b = GetLevelDifficultyColor(data.description)
+                    row.lvlText:SetTextColor(r, g, b)
                 else
                     row.lvlText:SetText("")
                 end
@@ -412,6 +491,33 @@ function MMM_GUI.InitializeWorldMapControls()
         end
     end
 
+    searchBox:SetScript("OnEditFocusGained", function()
+        this._focused = true
+        searchPlaceholder:Hide()
+    end)
+    searchBox:SetScript("OnEditFocusLost", function()
+        this._focused = false
+        if (this:GetText() or "") == "" then
+            searchPlaceholder:Show()
+        end
+    end)
+    searchBox:SetScript("OnTextChanged", function()
+        FauxScrollFrame_SetOffset(scrollFrame, 0)
+        RefreshFindList()
+    end)
+    searchBox:SetScript("OnEscapePressed", function()
+        if (this:GetText() or "") ~= "" then
+            this:SetText("")
+        end
+        this:ClearFocus()
+    end)
+    searchBox:SetScript("OnEnterPressed", function()
+        this:ClearFocus()
+        if currentList[1] then
+            ModernMapMarkers_FindMarker(currentList[1].id)
+        end
+    end)
+
     scrollFrame:SetScript("OnVerticalScroll", function()
         FauxScrollFrame_OnVerticalScroll(ROW_HEIGHT, RefreshFindList)
     end)
@@ -425,32 +531,44 @@ function MMM_GUI.InitializeWorldMapControls()
         SetButtonActive(btnWorldBoss, activeType == "WORLDBOSS")
     end
 
+    local function ClearSearchIfActive()
+        if (searchBox:GetText() or "") ~= "" then
+            searchBox:SetText("")
+            searchBox:ClearFocus()
+        end
+    end
+
     btnKalimdor:SetScript("OnClick", function()
         activeContinent = 1
+        ClearSearchIfActive()
         UpdateButtonStates()
         RefreshFindList()
     end)
 
     btnEK:SetScript("OnClick", function()
         activeContinent = 2
+        ClearSearchIfActive()
         UpdateButtonStates()
         RefreshFindList()
     end)
 
     btnDungeon:SetScript("OnClick", function()
         activeType = "DUNGEON"
+        ClearSearchIfActive()
         UpdateButtonStates()
         RefreshFindList()
     end)
 
     btnRaid:SetScript("OnClick", function()
         activeType = "RAID"
+        ClearSearchIfActive()
         UpdateButtonStates()
         RefreshFindList()
     end)
 
     btnWorldBoss:SetScript("OnClick", function()
         activeType = "WORLDBOSS"
+        ClearSearchIfActive()
         UpdateButtonStates()
         RefreshFindList()
     end)
@@ -460,10 +578,30 @@ function MMM_GUI.InitializeWorldMapControls()
         RefreshFindList()
     end
 
+    -- Keep dropdown strata above Magnify's WorldMapFrameScrollFrame on map show
+    local function SyncDropdownStrata()
+        if WorldMapFrameScrollFrame then
+            filterFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+            findFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+            findPanel:SetFrameStrata("FULLSCREEN_DIALOG")
+            if _G.pfQuestMapDropdown then
+                filterFrame:ClearAllPoints()
+                filterFrame:SetPoint("TOPRIGHT", _G.pfQuestMapDropdown, "BOTTOMRIGHT", 0, 0)
+            end
+        end
+    end
+
+    local origOnShow = WorldMapFrame:GetScript("OnShow")
+    WorldMapFrame:SetScript("OnShow", function()
+        if origOnShow then origOnShow() end
+        SyncDropdownStrata()
+    end)
+
     -- Close panel when the world map closes
     local origOnHide = WorldMapFrame:GetScript("OnHide")
     WorldMapFrame:SetScript("OnHide", function()
         if origOnHide then origOnHide() end
+        searchBox:ClearFocus()
         findPanel:Hide()
     end)
 
@@ -481,6 +619,9 @@ function MMM_GUI.InitializeWorldMapControls()
             _G.pfUI.api.SkinButton(btnDungeon)
             _G.pfUI.api.SkinButton(btnRaid)
             _G.pfUI.api.SkinButton(btnWorldBoss)
+        end
+        if _G.pfUI.api.CreateBackdrop then
+            _G.pfUI.api.CreateBackdrop(searchBox, nil, true)
         end
     end
     
